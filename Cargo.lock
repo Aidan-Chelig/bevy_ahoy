@@ -344,9 +344,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "avian3d"
-version = "0.6.0-rc.1"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59554a1f936b55ade114a5f6b68bf718060133296a170c5107ffe73abfa65ea9"
+checksum = "d0751cde05c2be789fad86cd19219daf8a8907e0c6c2175f2c8144706493f010"
 dependencies = [
  "approx",
  "avian_derive",
@@ -357,7 +357,6 @@ dependencies = [
  "bitflags 2.10.0",
  "derive_more",
  "disqualified",
- "glam 0.31.0",
  "glam_matrix_extras",
  "itertools 0.14.0",
  "obvhs",
@@ -383,9 +382,9 @@ dependencies = [
 
 [[package]]
 name = "avian_pickup"
-version = "0.5.0-rc.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d748fb55ac2c45d7eb3e3e97e8afd79914ad5fc52abaa1685d5450de74d65296"
+checksum = "2c3676d8b9b7141e8bb8d68863b40b99a0e2f575e02b068a353d180eb80d7476"
 dependencies = [
  "avian3d",
  "bevy_app",
@@ -450,7 +449,6 @@ dependencies = [
  "bevy_time",
  "bevy_transform",
  "bevy_trenchbroom",
- "bevy_trenchbroom_avian",
  "bevy_utils",
  "getrandom",
  "serde",
@@ -858,7 +856,8 @@ dependencies = [
 [[package]]
 name = "bevy_framepace"
 version = "0.21.0"
-source = "git+https://github.com/aevyrie/bevy_framepace#9be8f16210c341550e0593d57d12e54e7c9c1ee5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a42ab83f581861fd57b1c6170503a5e352a0937d799d03a4224e1735e668af51"
 dependencies = [
  "bevy_app",
  "bevy_diagnostic",
@@ -1164,9 +1163,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_materialize"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32d27421d71dc0dc4b3f7ba89efa07b5416b638e52a4a7552997aea7ec357bfc"
+checksum = "afdaf52ede03198f567041b079be04d1dd58cfef7bf82e3a34502b18c162ca08"
 dependencies = [
  "bevy",
  "serde",
@@ -1229,7 +1228,8 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_mod_mipmap_generator"
 version = "0.1.0"
-source = "git+https://github.com/DGriffin91/bevy_mod_mipmap_generator#a763a0a4715268a8735878476bdbe16f77579104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0e9b0f779b953be985a6083494becad4f9d56df9a639f1bca5b2444bdb73c4"
 dependencies = [
  "anyhow",
  "bevy",
@@ -1674,11 +1674,12 @@ dependencies = [
 
 [[package]]
 name = "bevy_trenchbroom"
-version = "0.12.0"
-source = "git+https://github.com/janhohenheim/bevy_trenchbroom?branch=avian-0.6#91136c292d25567a7ab7bed5a12a66f1c1675258"
+version = "0.14.0-dev"
+source = "git+https://github.com/Noxmore/bevy_trenchbroom#3041fdfbdf9584b3476f7427b028d1b732c09d47"
 dependencies = [
  "anyhow",
  "atomicow",
+ "avian3d",
  "bevy",
  "bevy_materialize",
  "bevy_mesh",
@@ -1694,7 +1695,7 @@ dependencies = [
  "jzon",
  "ndshape",
  "nil",
- "quake-util",
+ "quake-map",
  "serde",
  "serde_json",
  "strum",
@@ -1703,19 +1704,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_trenchbroom_avian"
-version = "0.13.0-rc.1"
-source = "git+https://github.com/janhohenheim/bevy_trenchbroom?branch=avian-0.6#91136c292d25567a7ab7bed5a12a66f1c1675258"
-dependencies = [
- "avian3d",
- "bevy",
- "bevy_trenchbroom",
-]
-
-[[package]]
 name = "bevy_trenchbroom_macros"
-version = "0.12.0"
-source = "git+https://github.com/janhohenheim/bevy_trenchbroom?branch=avian-0.6#91136c292d25567a7ab7bed5a12a66f1c1675258"
+version = "0.14.0-dev"
+source = "git+https://github.com/Noxmore/bevy_trenchbroom#3041fdfbdf9584b3476f7427b028d1b732c09d47"
 dependencies = [
  "deluxe",
  "heck 0.5.0",
@@ -4733,10 +4724,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "quake-util"
-version = "0.4.0"
+name = "quake-map"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "663a8931940a7bf465a672f54ad19864b91d761695f64c18cbe6cb9782d40023"
+checksum = "25851d44c42e15fe39c468ea63449314850fe48ec0626d7f3f1e7ae1a7b64662"
 
 [[package]]
 name = "quick-xml"

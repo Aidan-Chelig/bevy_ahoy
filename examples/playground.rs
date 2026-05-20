@@ -10,7 +10,6 @@ use bevy::{
 use bevy_ahoy::{PickupHoldConfig, PickupPullConfig, prelude::*};
 use bevy_enhanced_input::prelude::{Press, *};
 use bevy_trenchbroom::prelude::*;
-use bevy_trenchbroom_avian::AvianPhysicsBackend;
 use core::ops::Deref;
 
 use crate::util::{ExampleUtilPlugin, StableGround};
@@ -57,7 +56,6 @@ fn main() -> AppExit {
                         .smooth_by_default_angle()
                 }),
             ),
-            TrenchBroomPhysicsPlugin::new(AvianPhysicsBackend),
             ExampleUtilPlugin,
         ))
         .add_input_context::<PlayerInput>()
