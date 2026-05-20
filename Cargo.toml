@@ -1,7 +1,7 @@
 [package]
 name = "bevy_ahoy"
 authors = ["Jan Hohenheim <jan@hohenheim.ch>"]
-version = "0.1.0-rc.6"
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0 "
 description = "A fun 3D Kinematic Character Controller for Bevy + Avian + BEI."
@@ -17,7 +17,7 @@ serialize = ["dep:serde", "avian3d/serialize", "bevy_math/serialize", "avian_pic
 pickup = ["dep:avian_pickup"]
 
 [dependencies]
-avian3d = { version = "0.6.0-rc.1", default-features = false, features = ["parry-f32", "3d", "f32"] }
+avian3d = { version = "0.6", default-features = false, features = ["parry-f32", "3d", "f32"] }
 bevy_ecs = { version = "0.18", default-features = false }
 bevy_app = { version = "0.18", default-features = false }
 bevy_derive = { version = "0.18", default-features = false }
