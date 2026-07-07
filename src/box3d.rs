@@ -28,6 +28,8 @@ use crate::{
 pub use ::bevy_box3d;
 pub use ::box3d;
 
+const MAX_BOX3D_DEPENETRATION_PLANES: usize = 8;
+
 /// Common Box3D imports for users experimenting with the `box3d` feature.
 pub mod prelude {
     pub use super::{
@@ -555,6 +557,7 @@ fn run_box3d_kcc(
         state.last_ground.tick(time.delta());
         state.last_step_up.tick(time.delta());
         state.last_step_down.tick(time.delta());
+        depenetrate_box3d_character(&runtime, cfg, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform);
 
         if state.grounded.is_none() {
@@ -625,6 +628,7 @@ fn box3d_ground_move(
 
     if cast_box3d_character(runtime, cfg, transform.translation, movement).is_none() {
         transform.translation += movement;
+        depenetrate_box3d_character(runtime, cfg, transform);
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
@@ -814,6 +818,7 @@ fn box3d_step_move(
     }
 
     transform.translation.y -= down_hit.distance;
+    depenetrate_box3d_character(runtime, cfg, transform);
     let up_position = transform.translation;
     let down_dist = down_position.xz().distance_squared(original_position.xz());
     let up_dist = up_position.xz().distance_squared(original_position.xz());
@@ -877,6 +882,7 @@ fn snap_box3d_to_ground(
     if original_position.y - transform.translation.y > cfg.step_down_detection_distance {
         state.last_step_down.reset();
     }
+    depenetrate_box3d_character(runtime, cfg, transform);
 }
 
 fn update_box3d_grounded(
@@ -892,6 +898,31 @@ fn update_box3d_grounded(
         Vec3::NEG_Y * cfg.ground_distance,
     );
     state.grounded = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
+}
+
+fn depenetrate_box3d_character(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    transform: &mut Transform,
+) {
+    let points = box3d_character_points(cfg);
+    let mut planes = Vec::new();
+    runtime.world.collide_mover(
+        to_box3d_vec3(transform.translation),
+        points,
+        cfg.radius,
+        box3d::QueryFilter::default(),
+        |_, plane| {
+            planes.push(box3d::CollisionPlane::rigid(plane.plane));
+            planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
+        },
+    );
+    if planes.is_empty() {
+        return;
+    }
+
+    let offset = box3d::solve_planes(box3d::Vec3::ZERO, &mut planes);
+    transform.translation += from_box3d_vec3(offset);
 }
 
 fn cast_box3d_character(
