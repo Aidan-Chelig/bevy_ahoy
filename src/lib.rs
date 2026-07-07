@@ -31,6 +31,12 @@ pub mod prelude {
         input::{DropObject, PullObject, ThrowObject},
         pickup,
     };
+
+    #[cfg(feature = "box3d")]
+    pub use crate::box3d::{
+        AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
+        AhoyBox3dVelocity, Box3dBodyType, Box3dColliderShape, Box3dRuntime,
+    };
 }
 
 #[cfg(feature = "pickup")]

@@ -115,8 +115,30 @@ bevy_ahoy = { version = "0.1", features = ["box3d"] }
 
 Ahoy's character controller currently still uses Avian for movement. `bevy_box3d`
 0.3 targets Bevy 0.19, while this crate currently targets Bevy 0.18, so Box3D
-support is exposed as interop/re-export support until the dependency stack is
-upgraded or `bevy_box3d` exposes a compatible Bevy 0.18 API.
+support includes a lightweight `AhoyBox3dPlugin` runtime for Bevy 0.18 and
+re-exports `bevy_box3d` for projects that can use its Bevy 0.19 integration.
+
+```rust
+use bevy::prelude::*;
+use bevy_ahoy::box3d::prelude::*;
+
+App::new()
+    .add_plugins((DefaultPlugins, AhoyBox3dPlugin::default()))
+    .add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((
+            AhoyBox3dBody::DYNAMIC,
+            AhoyBox3dCollider::sphere(0.5),
+            AhoyBox3dVelocity::default(),
+            Transform::from_xyz(0.0, 4.0, 0.0),
+        ));
+
+        commands.spawn((
+            AhoyBox3dBody::STATIC,
+            AhoyBox3dCollider::cuboid(Vec3::new(8.0, 0.5, 8.0)),
+            Transform::from_xyz(0.0, -0.5, 0.0),
+        ));
+    });
+```
 
 ## Inspiration
 

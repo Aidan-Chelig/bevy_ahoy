@@ -90,9 +90,29 @@ impl BodyId {
         unsafe { sys::b3Body_SetTransform(self.raw, position.into(), rotation.into()) };
     }
 
+    pub fn body_type(self) -> crate::BodyType {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetType(self.raw) }.into()
+    }
+
+    pub fn set_body_type(self, body_type: crate::BodyType) {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_SetType(self.raw, body_type.into()) };
+    }
+
+    pub fn linear_velocity(self) -> Vec3 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetLinearVelocity(self.raw) }.into()
+    }
+
     pub fn set_linear_velocity(self, velocity: Vec3) {
         assert!(self.is_valid());
         unsafe { sys::b3Body_SetLinearVelocity(self.raw, velocity.into()) };
+    }
+
+    pub fn angular_velocity(self) -> Vec3 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetAngularVelocity(self.raw) }.into()
     }
 
     pub fn set_angular_velocity(self, velocity: Vec3) {
