@@ -15,13 +15,15 @@ use bevy_ecs::{
     prelude::*,
     system::{NonSend, NonSendMut},
 };
-use bevy_math::{Quat, Vec3, Vec3Swizzles};
+use bevy_math::{Dir3, Quat, Vec3, Vec3Swizzles};
 use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
 use core::time::Duration;
 use std::collections::HashMap;
 
-use crate::{CharacterLook, input::AccumulatedInput, kcc};
+use crate::{
+    CharacterControllerOutput, CharacterLook, TouchingEntity, input::AccumulatedInput, kcc,
+};
 
 pub use ::bevy_box3d;
 pub use ::box3d;
@@ -206,6 +208,7 @@ pub struct AhoyBox3dShape {
 #[require(
     AccumulatedInput,
     Box3dCharacterControllerState,
+    CharacterControllerOutput,
     Transform,
     CharacterLook
 )]
@@ -541,11 +544,14 @@ fn run_box3d_kcc(
         &mut Box3dCharacterControllerState,
         &mut AccumulatedInput,
         &CharacterLook,
+        &mut CharacterControllerOutput,
         &mut Transform,
     )>,
 ) {
     let delta = time.delta_secs();
-    for (cfg, mut state, mut input, look, mut transform) in &mut characters {
+    for (cfg, mut state, mut input, look, mut output, mut transform) in &mut characters {
+        output.mantle = None;
+        output.touching_entities.clear();
         state.last_ground.tick(time.delta());
         state.last_step_up.tick(time.delta());
         state.last_step_down.tick(time.delta());
@@ -568,10 +574,24 @@ fn run_box3d_kcc(
 
         validate_box3d_velocity(cfg, &mut state);
         if state.grounded.is_some() {
-            box3d_ground_move(&runtime, cfg, &mut state, &mut transform, delta);
+            box3d_ground_move(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
         } else {
             let movement = state.velocity * delta;
-            box3d_move_and_slide(&runtime, cfg, &mut state, &mut transform, movement);
+            box3d_move_and_slide(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                movement,
+            );
         }
         update_box3d_grounded(&runtime, cfg, &mut state, &transform);
 
@@ -590,6 +610,7 @@ fn box3d_ground_move(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
     transform: &mut Transform,
     delta: f32,
 ) {
@@ -608,7 +629,7 @@ fn box3d_ground_move(
         return;
     }
 
-    box3d_step_move(runtime, cfg, state, transform, movement);
+    box3d_step_move(runtime, cfg, state, output, transform, movement);
     snap_box3d_to_ground(runtime, cfg, state, transform);
 }
 
@@ -656,7 +677,7 @@ fn box3d_ground_accelerate(
     wish_velocity: Vec3,
     delta: f32,
 ) {
-    let Ok((wish_dir, wish_speed)) = bevy_math::Dir3::new_and_length(wish_velocity) else {
+    let Ok((wish_dir, wish_speed)) = Dir3::new_and_length(wish_velocity) else {
         return;
     };
     let current_speed = state.velocity.dot(*wish_dir);
@@ -674,7 +695,7 @@ fn box3d_air_accelerate(
     wish_velocity: Vec3,
     delta: f32,
 ) {
-    let Ok((wish_dir, wish_speed)) = bevy_math::Dir3::new_and_length(wish_velocity) else {
+    let Ok((wish_dir, wish_speed)) = Dir3::new_and_length(wish_velocity) else {
         return;
     };
     let wish_speed_cap = wish_speed.min(cfg.max_air_wish_speed);
@@ -709,6 +730,7 @@ fn box3d_move_and_slide(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
     transform: &mut Transform,
     movement: Vec3,
 ) {
@@ -722,6 +744,8 @@ fn box3d_move_and_slide(
             transform.translation += remaining;
             break;
         };
+
+        push_box3d_touch(output, &hit, transform.translation, state.velocity);
 
         let travel = hit.distance.max(0.0);
         let direction = remaining.normalize_or_zero();
@@ -742,18 +766,22 @@ fn box3d_step_move(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
     transform: &mut Transform,
     movement: Vec3,
 ) {
     let original_position = transform.translation;
     let original_velocity = state.velocity;
+    let original_touching_entities = output.touching_entities.clone();
 
-    box3d_move_and_slide(runtime, cfg, state, transform, movement);
+    box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
+    let down_touching_entities = output.touching_entities.clone();
     let down_position = transform.translation;
     let down_velocity = state.velocity;
 
     transform.translation = original_position;
     state.velocity = original_velocity;
+    output.touching_entities = original_touching_entities;
 
     let up = Vec3::Y * cfg.step_size;
     let up_distance = cast_box3d_character(runtime, cfg, transform.translation, up)
@@ -765,20 +793,23 @@ fn box3d_step_move(
     if cast_box3d_character(runtime, cfg, transform.translation, forward_probe).is_some() {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        output.touching_entities = down_touching_entities;
         return;
     }
 
-    box3d_move_and_slide(runtime, cfg, state, transform, movement);
+    box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
 
     let down = Vec3::NEG_Y * cfg.step_size;
     let Some(down_hit) = cast_box3d_character(runtime, cfg, transform.translation, down) else {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        output.touching_entities = down_touching_entities;
         return;
     };
     if down_hit.normal.y < cfg.min_walk_cos {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        output.touching_entities = down_touching_entities;
         return;
     }
 
@@ -790,10 +821,34 @@ fn box3d_step_move(
     if down_dist >= up_dist {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        output.touching_entities = down_touching_entities;
     } else {
         state.velocity.y = down_velocity.y;
         state.last_step_up.reset();
     }
+}
+
+fn push_box3d_touch(
+    output: &mut CharacterControllerOutput,
+    hit: &Box3dCastHit,
+    character_position: Vec3,
+    character_velocity: Vec3,
+) {
+    let Some(entity) = hit.entity else {
+        return;
+    };
+    let Ok(normal) = Dir3::new(hit.normal) else {
+        return;
+    };
+    output.touching_entities.push(TouchingEntity {
+        entity,
+        distance: hit.distance,
+        point: hit.point,
+        normal,
+        character_position,
+        character_velocity,
+        collision_distance: hit.collision_distance,
+    });
 }
 
 fn snap_box3d_to_ground(
