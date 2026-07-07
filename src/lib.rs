@@ -59,6 +59,8 @@ use bevy_ecs::{entity::MapEntities, intern::Interned, schedule::ScheduleLabel};
 use bevy_time::Stopwatch;
 use core::time::Duration;
 
+#[cfg(feature = "box3d")]
+pub mod box3d;
 pub mod camera;
 mod dynamics;
 mod fixed_update_utils;

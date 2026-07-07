@@ -104,6 +104,20 @@ fn spawn_player(mut commands: Commands) {
 }
 ```
 
+### Box3D feature
+
+Enable the optional `box3d` feature to depend on and re-export [`box3d`](https://crates.io/crates/box3d)
+and [`bevy_box3d`](https://crates.io/crates/bevy_box3d):
+
+```toml
+bevy_ahoy = { version = "0.1", features = ["box3d"] }
+```
+
+Ahoy's character controller currently still uses Avian for movement. `bevy_box3d`
+0.3 targets Bevy 0.19, while this crate currently targets Bevy 0.18, so Box3D
+support is exposed as interop/re-export support until the dependency stack is
+upgraded or `bevy_box3d` exposes a compatible Bevy 0.18 API.
+
 ## Inspiration
 
 - The underlying move-and-slide uses Avian's implementation, the inspirations for which are [listed in the implementing PR](https://github.com/avianphysics/avian/pull/894).
