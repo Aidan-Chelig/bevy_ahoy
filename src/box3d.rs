@@ -61,6 +61,8 @@ impl Plugin for AhoyBox3dPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    cleanup_box3d_shapes,
+                    cleanup_box3d_bodies,
                     create_box3d_bodies,
                     create_box3d_shapes,
                     sync_box3d_body_changes,
@@ -198,6 +200,7 @@ pub struct Box3dRuntime {
     world: box3d::World,
     bodies: HashMap<Entity, box3d::BodyId>,
     shapes: HashMap<Entity, box3d::ShapeId>,
+    shape_bodies: HashMap<Entity, Entity>,
     body_entities: HashMap<u64, Entity>,
     shape_entities: HashMap<u64, Entity>,
 }
@@ -208,6 +211,7 @@ impl Box3dRuntime {
             world: box3d::World::new(to_box3d_vec3(config.gravity)),
             bodies: HashMap::default(),
             shapes: HashMap::default(),
+            shape_bodies: HashMap::default(),
             body_entities: HashMap::default(),
             shape_entities: HashMap::default(),
         }
@@ -232,13 +236,63 @@ impl Box3dRuntime {
     pub fn shape_entity(&self, shape: box3d::ShapeId) -> Option<Entity> {
         self.shape_entities.get(&shape.to_bits()).copied()
     }
+
+    fn remove_shape(&mut self, entity: Entity, destroy: bool) {
+        if let Some(shape) = self.shapes.remove(&entity) {
+            self.shape_entities.remove(&shape.to_bits());
+            if destroy && shape.is_valid() {
+                shape.destroy(true);
+            }
+        }
+        self.shape_bodies.remove(&entity);
+    }
+
+    fn remove_body(&mut self, entity: Entity) {
+        let shape_entities = self.shapes_for_body(entity);
+        for shape_entity in shape_entities {
+            self.remove_shape(shape_entity, false);
+        }
+        if let Some(body) = self.bodies.remove(&entity) {
+            self.body_entities.remove(&body.to_bits());
+            if body.is_valid() {
+                body.destroy();
+            }
+        }
+    }
+
+    fn shapes_for_body(&self, body_entity: Entity) -> Vec<Entity> {
+        self.shape_bodies
+            .iter()
+            .filter_map(|(shape_entity, owner)| (*owner == body_entity).then_some(*shape_entity))
+            .collect()
+    }
 }
 
 impl Drop for Box3dRuntime {
     fn drop(&mut self) {
         for (_, body) in self.bodies.drain() {
-            body.destroy();
+            if body.is_valid() {
+                body.destroy();
+            }
         }
+    }
+}
+
+fn cleanup_box3d_shapes(
+    mut runtime: NonSendMut<Box3dRuntime>,
+    mut removed_shapes: RemovedComponents<AhoyBox3dShape>,
+) {
+    for entity in removed_shapes.read() {
+        runtime.remove_shape(entity, true);
+    }
+}
+
+fn cleanup_box3d_bodies(
+    mut runtime: NonSendMut<Box3dRuntime>,
+    mut removed_bodies: RemovedComponents<AhoyBox3dNativeBody>,
+) {
+    for entity in removed_bodies.read() {
+        runtime.remove_body(entity);
     }
 }
 
@@ -307,6 +361,7 @@ fn create_box3d_shapes(
         let shape_id = shape;
 
         runtime.shapes.insert(entity, shape_id);
+        runtime.shape_bodies.insert(entity, entity);
         runtime.shape_entities.insert(shape_id.to_bits(), entity);
         commands
             .entity(entity)
