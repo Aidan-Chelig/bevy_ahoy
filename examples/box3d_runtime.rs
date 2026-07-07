@@ -87,6 +87,16 @@ fn setup(
         Transform::from_xyz(-8.0, 1.0, 0.0),
         Color::srgb(0.3, 0.35, 0.4),
     );
+    for i in 0..4 {
+        spawn_dynamic_box(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            Vec3::splat(0.8),
+            Transform::from_xyz(1.5 + i as f32 * 1.0, 0.4, 3.0),
+            Color::srgb(0.65, 0.48, 0.28),
+        );
+    }
 
     let player = commands
         .spawn((
@@ -134,6 +144,27 @@ fn spawn_box(
         MeshMaterial3d(materials.add(color)),
         transform,
         AhoyBox3dBody::STATIC,
+        AhoyBox3dCollider::cuboid(size * 0.5),
+    ));
+}
+
+fn spawn_dynamic_box(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    size: Vec3,
+    transform: Transform,
+    color: Color,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::from_size(size))),
+        MeshMaterial3d(materials.add(color)),
+        transform,
+        AhoyBox3dBody {
+            linear_damping: 0.4,
+            angular_damping: 0.4,
+            ..AhoyBox3dBody::DYNAMIC
+        },
         AhoyBox3dCollider::cuboid(size * 0.5),
     ));
 }

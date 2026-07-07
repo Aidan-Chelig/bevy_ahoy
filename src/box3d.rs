@@ -78,6 +78,7 @@ impl Plugin for AhoyBox3dPlugin {
                     sync_box3d_velocity_changes,
                     step_box3d,
                     run_box3d_kcc,
+                    apply_box3d_kcc_impulses,
                 )
                     .chain(),
             )
@@ -233,6 +234,7 @@ pub struct Box3dCharacterController {
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
     pub max_slides: usize,
+    pub push_mass: f32,
     pub step_size: f32,
     pub step_down_detection_distance: f32,
     pub min_step_ledge_space: f32,
@@ -259,6 +261,7 @@ impl Default for Box3dCharacterController {
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
             max_slides: 4,
+            push_mass: 80.0,
             step_size: 0.7,
             step_down_detection_distance: 0.2,
             min_step_ledge_space: 0.2,
@@ -606,6 +609,37 @@ fn run_box3d_kcc(
         }
 
         validate_box3d_velocity(cfg, &mut state);
+    }
+}
+
+fn apply_box3d_kcc_impulses(
+    runtime: NonSend<Box3dRuntime>,
+    characters: Query<(&Box3dCharacterController, &CharacterControllerOutput)>,
+) {
+    for (cfg, output) in &characters {
+        for touch in &output.touching_entities {
+            let Some(body_entity) = runtime.shape_bodies.get(&touch.entity).copied() else {
+                continue;
+            };
+            let Some(body) = runtime.body(body_entity) else {
+                continue;
+            };
+            if !body.is_valid() || body.body_type() != box3d::BodyType::Dynamic {
+                continue;
+            }
+
+            let touch_dir = -*touch.normal;
+            let body_velocity =
+                from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(touch.point)));
+            let relative_velocity = touch.character_velocity - body_velocity;
+            let touch_velocity = touch_dir.dot(relative_velocity) * touch_dir;
+            let impulse = touch_velocity * cfg.push_mass;
+            if impulse.length_squared() <= f32::EPSILON || !impulse.is_finite() {
+                continue;
+            }
+
+            body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(touch.point), true);
+        }
     }
 }
 

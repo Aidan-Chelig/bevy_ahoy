@@ -120,6 +120,16 @@ impl BodyId {
         unsafe { sys::b3Body_SetAngularVelocity(self.raw, velocity.into()) };
     }
 
+    pub fn world_point_velocity(self, world_point: Vec3) -> Vec3 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetWorldPointVelocity(self.raw, world_point.into()) }.into()
+    }
+
+    pub fn apply_linear_impulse(self, impulse: Vec3, point: Vec3, wake: bool) {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_ApplyLinearImpulse(self.raw, impulse.into(), point.into(), wake) };
+    }
+
     pub fn set_linear_damping(self, damping: f32) {
         assert!(damping.is_finite() && damping >= 0.0);
         assert!(self.is_valid());
