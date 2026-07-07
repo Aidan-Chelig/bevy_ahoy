@@ -1,10 +1,24 @@
-use bevy::prelude::*;
-use bevy_ahoy::box3d::prelude::*;
+use bevy::{
+    input::common_conditions::input_just_pressed,
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions},
+};
+use bevy_ahoy::{
+    AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
+    box3d::prelude::*,
+    input::{Jump, Movement, RotateCamera},
+    prelude::CharacterLook,
+};
+use bevy_enhanced_input::prelude::*;
+use std::f32::consts::TAU;
 
 fn main() -> AppExit {
     App::new()
         .add_plugins((
             DefaultPlugins,
+            EnhancedInputPlugin,
+            AhoyFixedUpdateUtilsPlugin,
+            AhoyInputPlugin,
             AhoyBox3dPlugin {
                 config: AhoyBox3dConfig {
                     gravity: Vec3::new(0.0, -9.8, 0.0),
@@ -12,7 +26,17 @@ fn main() -> AppExit {
                 },
             },
         ))
+        .add_input_context::<PlayerInput>()
+        .add_observer(rotate_player_look)
         .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                capture_cursor.run_if(input_just_pressed(MouseButton::Left)),
+                release_cursor.run_if(input_just_pressed(KeyCode::Escape)),
+                sync_camera_to_player,
+            ),
+        )
         .run()
 }
 
@@ -23,7 +47,8 @@ fn setup(
 ) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-6.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 2.0, 8.0),
+        PlayerCamera,
     ));
     commands.spawn((
         DirectionalLight {
@@ -33,26 +58,118 @@ fn setup(
         Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    let floor_mesh = meshes.add(Cuboid::new(12.0, 1.0, 12.0));
-    let floor_material = materials.add(Color::srgb(0.25, 0.28, 0.32));
-    commands.spawn((
-        Mesh3d(floor_mesh),
-        MeshMaterial3d(floor_material),
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(24.0, 1.0, 24.0),
         Transform::from_xyz(0.0, -0.5, 0.0),
-        AhoyBox3dBody::STATIC,
-        AhoyBox3dCollider::cuboid(Vec3::new(6.0, 0.5, 6.0)),
-    ));
-
-    let ball_mesh = meshes.add(Sphere::new(0.5));
-    let ball_material = materials.add(Color::srgb(0.1, 0.65, 0.95));
-    for i in 0..8 {
-        commands.spawn((
-            Mesh3d(ball_mesh.clone()),
-            MeshMaterial3d(ball_material.clone()),
-            Transform::from_xyz(-3.5 + i as f32, 2.0 + i as f32 * 0.7, 0.0),
-            AhoyBox3dBody::DYNAMIC,
-            AhoyBox3dCollider::sphere(0.5),
-            AhoyBox3dVelocity::default(),
-        ));
+        Color::srgb(0.25, 0.28, 0.32),
+    );
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(4.0, 0.4, 4.0),
+        Transform::from_xyz(5.0, 0.2, 0.0)
+            .with_rotation(Quat::from_rotation_z(-20.0_f32.to_radians())),
+        Color::srgb(0.38, 0.43, 0.48),
+    );
+    for i in 0..6 {
+        spawn_box(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            Vec3::new(1.0, 0.18 + i as f32 * 0.08, 3.0),
+            Transform::from_xyz(-5.0 + i as f32 * 1.05, 0.09 + i as f32 * 0.04, -4.0),
+            Color::srgb(0.36, 0.4, 0.45),
+        );
     }
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(1.0, 2.0, 8.0),
+        Transform::from_xyz(-8.0, 1.0, 0.0),
+        Color::srgb(0.3, 0.35, 0.4),
+    );
+
+    commands.spawn((
+        Transform::from_xyz(0.0, 2.0, 6.0),
+        Box3dCharacterController::default(),
+        PlayerInput,
+        actions!(PlayerInput[
+            (
+                Action::<Movement>::new(),
+                DeadZone::default(),
+                Bindings::spawn((Cardinal::wasd_keys(), Axial::left_stick()))
+            ),
+            (
+                Action::<Jump>::new(),
+                bindings![KeyCode::Space, GamepadButton::South],
+            ),
+            (
+                Action::<RotateCamera>::new(),
+                Bindings::spawn((
+                    Spawn((Binding::mouse_motion(), Scale::splat(0.07))),
+                    Axial::right_stick().with((Scale::splat(4.0), DeadZone::default())),
+                ))
+            ),
+        ]),
+    ));
+}
+
+fn spawn_box(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    size: Vec3,
+    transform: Transform,
+    color: Color,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::from_size(size))),
+        MeshMaterial3d(materials.add(color)),
+        transform,
+        AhoyBox3dBody::STATIC,
+        AhoyBox3dCollider::cuboid(size * 0.5),
+    ));
+}
+
+#[derive(Component)]
+struct PlayerCamera;
+
+#[derive(Component, Default)]
+struct PlayerInput;
+
+fn rotate_player_look(
+    rotate: On<Fire<RotateCamera>>,
+    mut looks: Query<&mut CharacterLook, With<Box3dCharacterController>>,
+) {
+    let Ok(mut look) = looks.get_mut(rotate.context) else {
+        return;
+    };
+    let delta = -rotate.value;
+    look.yaw += delta.x.to_radians();
+    look.pitch += delta.y.to_radians();
+    look.pitch = look.pitch.clamp(-TAU / 4.0 + 0.01, TAU / 4.0 - 0.01);
+}
+
+fn sync_camera_to_player(
+    player: Single<(&Transform, &CharacterLook), With<Box3dCharacterController>>,
+    mut camera: Single<&mut Transform, (With<PlayerCamera>, Without<Box3dCharacterController>)>,
+) {
+    let (player_transform, look) = *player;
+    camera.translation = player_transform.translation + Vec3::Y * 0.6;
+    camera.rotation = look.to_quat();
+}
+
+fn capture_cursor(mut cursor: Single<&mut CursorOptions>) {
+    cursor.grab_mode = CursorGrabMode::Locked;
+    cursor.visible = false;
+}
+
+fn release_cursor(mut cursor: Single<&mut CursorOptions>) {
+    cursor.visible = true;
+    cursor.grab_mode = CursorGrabMode::None;
 }

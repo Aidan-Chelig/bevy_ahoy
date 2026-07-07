@@ -15,9 +15,13 @@ use bevy_ecs::{
     prelude::*,
     system::{NonSend, NonSendMut},
 };
-use bevy_math::{Quat, Vec3};
+use bevy_math::{Quat, Vec3, Vec3Swizzles};
+use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
+use core::time::Duration;
 use std::collections::HashMap;
+
+use crate::{CharacterLook, input::AccumulatedInput, kcc};
 
 pub use ::bevy_box3d;
 pub use ::box3d;
@@ -26,7 +30,8 @@ pub use ::box3d;
 pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
-        AhoyBox3dVelocity, Box3dBodyType, Box3dColliderShape, Box3dRuntime,
+        AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
+        Box3dCharacterControllerState, Box3dColliderShape, Box3dRuntime,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -68,6 +73,7 @@ impl Plugin for AhoyBox3dPlugin {
                     sync_box3d_body_changes,
                     sync_box3d_velocity_changes,
                     step_box3d,
+                    run_box3d_kcc,
                 )
                     .chain(),
             )
@@ -193,6 +199,88 @@ pub struct AhoyBox3dNativeBody {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Component)]
 pub struct AhoyBox3dShape {
     pub id: box3d::ShapeId,
+}
+
+/// Source-style kinematic character controller backed by Box3D shape casts.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[require(
+    AccumulatedInput,
+    Box3dCharacterControllerState,
+    Transform,
+    CharacterLook
+)]
+pub struct Box3dCharacterController {
+    pub height: f32,
+    pub radius: f32,
+    pub ground_distance: f32,
+    pub min_walk_cos: f32,
+    pub stop_speed: f32,
+    pub friction_hz: f32,
+    pub acceleration_hz: f32,
+    pub air_acceleration_hz: f32,
+    pub gravity: f32,
+    pub speed: f32,
+    pub max_speed: f32,
+    pub max_air_wish_speed: f32,
+    pub jump_height: f32,
+    pub coyote_time: Duration,
+    pub jump_input_buffer: Duration,
+    pub skin_width: f32,
+    pub max_slides: usize,
+}
+
+impl Default for Box3dCharacterController {
+    fn default() -> Self {
+        Self {
+            height: 1.8,
+            radius: 0.7,
+            ground_distance: 0.05,
+            min_walk_cos: 40.0_f32.to_radians().cos(),
+            stop_speed: 2.54,
+            friction_hz: 12.0,
+            acceleration_hz: 8.0,
+            air_acceleration_hz: 12.0,
+            gravity: 29.0,
+            speed: 12.0,
+            max_speed: 100.0,
+            max_air_wish_speed: 0.76,
+            jump_height: 1.8,
+            coyote_time: Duration::from_millis(100),
+            jump_input_buffer: Duration::from_millis(150),
+            skin_width: 0.015,
+            max_slides: 4,
+        }
+    }
+}
+
+/// Runtime state for [`Box3dCharacterController`].
+#[derive(Clone, Debug, PartialEq, Component)]
+pub struct Box3dCharacterControllerState {
+    pub velocity: Vec3,
+    pub grounded: Option<Box3dCastHit>,
+    pub last_ground: Stopwatch,
+}
+
+impl Default for Box3dCharacterControllerState {
+    fn default() -> Self {
+        let mut last_ground = Stopwatch::new();
+        last_ground.set_elapsed(Duration::MAX);
+        Self {
+            velocity: Vec3::ZERO,
+            grounded: None,
+            last_ground,
+        }
+    }
+}
+
+/// Hit data produced by Box3D character casts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Box3dCastHit {
+    pub entity: Option<Entity>,
+    pub distance: f32,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub collision_distance: f32,
 }
 
 /// Non-send runtime resource containing the native Box3D world.
@@ -399,11 +487,7 @@ fn sync_box3d_velocity_changes(
     }
 }
 
-fn step_box3d(
-    config: Res<AhoyBox3dConfig>,
-    time: Res<bevy_time::Time>,
-    runtime: NonSend<Box3dRuntime>,
-) {
+fn step_box3d(config: Res<AhoyBox3dConfig>, time: Res<Time>, runtime: NonSend<Box3dRuntime>) {
     let delta = time.delta_secs();
     if delta > 0.0 {
         runtime.world.step(delta, config.sub_steps);
@@ -429,6 +513,250 @@ fn writeback_box3d_transforms(
             velocity.angular = from_box3d_vec3(native_body.id.angular_velocity());
         }
     }
+}
+
+fn run_box3d_kcc(
+    runtime: NonSend<Box3dRuntime>,
+    time: Res<Time>,
+    mut characters: Query<(
+        &Box3dCharacterController,
+        &mut Box3dCharacterControllerState,
+        &mut AccumulatedInput,
+        &CharacterLook,
+        &mut Transform,
+    )>,
+) {
+    let delta = time.delta_secs();
+    for (cfg, mut state, mut input, look, mut transform) in &mut characters {
+        state.last_ground.tick(time.delta());
+        update_box3d_grounded(&runtime, cfg, &mut state, &transform);
+
+        if state.grounded.is_none() {
+            state.velocity.y -= cfg.gravity * 0.5 * delta;
+        }
+
+        handle_box3d_jump(cfg, &mut state, &mut input);
+
+        let wish_velocity = box3d_wish_velocity(cfg, &input, look);
+        if state.grounded.is_some() {
+            apply_box3d_friction(cfg, &mut state, delta);
+            box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
+            state.velocity.y = state.velocity.y.min(0.0);
+        } else {
+            box3d_air_accelerate(cfg, &mut state, wish_velocity, delta);
+        }
+
+        validate_box3d_velocity(cfg, &mut state);
+        let movement = state.velocity * delta;
+        box3d_move_and_slide(&runtime, cfg, &mut state, &mut transform, movement);
+        update_box3d_grounded(&runtime, cfg, &mut state, &transform);
+
+        if state.grounded.is_some() {
+            state.velocity.y = 0.0;
+            state.last_ground.reset();
+        } else {
+            state.velocity.y -= cfg.gravity * 0.5 * delta;
+        }
+
+        validate_box3d_velocity(cfg, &mut state);
+    }
+}
+
+fn handle_box3d_jump(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+) {
+    if state.grounded.is_none() && state.last_ground.elapsed() > cfg.coyote_time {
+        return;
+    }
+    let Some(jump_time) = input.jumped.clone() else {
+        return;
+    };
+    if jump_time.elapsed() > cfg.jump_input_buffer {
+        return;
+    }
+
+    input.jumped = None;
+    state.grounded = None;
+    state.last_ground.set_elapsed(cfg.coyote_time);
+    state.velocity.y += (2.0 * cfg.gravity * cfg.jump_height).sqrt();
+}
+
+fn box3d_wish_velocity(
+    cfg: &Box3dCharacterController,
+    input: &AccumulatedInput,
+    look: &CharacterLook,
+) -> Vec3 {
+    let movement = input.last_movement.unwrap_or_default();
+    let mut forward = kcc::forward(look.to_quat());
+    forward.y = 0.0;
+    forward = forward.normalize_or_zero();
+    let mut right = kcc::right(look.to_quat());
+    right.y = 0.0;
+    right = right.normalize_or_zero();
+
+    let wish_velocity = movement.y * forward + movement.x * right;
+    wish_velocity.normalize_or_zero() * cfg.speed
+}
+
+fn box3d_ground_accelerate(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    wish_velocity: Vec3,
+    delta: f32,
+) {
+    let Ok((wish_dir, wish_speed)) = bevy_math::Dir3::new_and_length(wish_velocity) else {
+        return;
+    };
+    let current_speed = state.velocity.dot(*wish_dir);
+    let add_speed = wish_speed - current_speed;
+    if add_speed <= 0.0 {
+        return;
+    }
+    let accel_speed = (wish_speed * cfg.acceleration_hz * delta).min(add_speed);
+    state.velocity += accel_speed * wish_dir;
+}
+
+fn box3d_air_accelerate(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    wish_velocity: Vec3,
+    delta: f32,
+) {
+    let Ok((wish_dir, wish_speed)) = bevy_math::Dir3::new_and_length(wish_velocity) else {
+        return;
+    };
+    let wish_speed_cap = wish_speed.min(cfg.max_air_wish_speed);
+    let current_speed = state.velocity.dot(*wish_dir);
+    let add_speed = wish_speed_cap - current_speed;
+    if add_speed <= 0.0 {
+        return;
+    }
+    let accel_speed = (wish_speed * cfg.air_acceleration_hz * delta).min(add_speed);
+    state.velocity += accel_speed * wish_dir;
+}
+
+fn apply_box3d_friction(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    delta: f32,
+) {
+    let speed = state.velocity.xz().length();
+    if speed < 0.001 {
+        return;
+    }
+    let control = speed.max(cfg.stop_speed);
+    let drop = control * cfg.friction_hz * delta;
+    let new_speed = (speed - drop).max(0.0);
+    if new_speed != speed {
+        state.velocity.x *= new_speed / speed;
+        state.velocity.z *= new_speed / speed;
+    }
+}
+
+fn box3d_move_and_slide(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    transform: &mut Transform,
+    movement: Vec3,
+) {
+    let mut remaining = movement;
+    for _ in 0..cfg.max_slides {
+        if remaining.length_squared() <= f32::EPSILON {
+            break;
+        }
+
+        let Some(hit) = cast_box3d_character(runtime, cfg, transform.translation, remaining) else {
+            transform.translation += remaining;
+            break;
+        };
+
+        let travel = hit.distance.max(0.0);
+        let direction = remaining.normalize_or_zero();
+        transform.translation += direction * travel;
+        transform.translation += hit.normal * cfg.skin_width;
+
+        let into_plane = state.velocity.dot(hit.normal).min(0.0);
+        state.velocity -= into_plane * hit.normal;
+
+        let traveled = direction * travel;
+        remaining -= traveled;
+        let blocked = remaining.dot(hit.normal).min(0.0);
+        remaining -= blocked * hit.normal;
+    }
+}
+
+fn update_box3d_grounded(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    transform: &Transform,
+) {
+    let hit = cast_box3d_character(
+        runtime,
+        cfg,
+        transform.translation,
+        Vec3::NEG_Y * cfg.ground_distance,
+    );
+    state.grounded = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
+}
+
+fn cast_box3d_character(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    origin: Vec3,
+    movement: Vec3,
+) -> Option<Box3dCastHit> {
+    let distance = movement.length();
+    if distance <= f32::EPSILON {
+        return None;
+    }
+
+    let points = box3d_character_points(cfg);
+    let proxy = box3d::ShapeProxy::new(&points, cfg.radius).ok()?;
+    let mut closest: Option<Box3dCastHit> = None;
+    runtime.world.cast_shape(
+        to_box3d_vec3(origin),
+        proxy,
+        to_box3d_vec3(movement),
+        box3d::QueryFilter::default(),
+        |hit| {
+            let collision_distance = hit.fraction * distance;
+            let safe_distance = (collision_distance - cfg.skin_width).max(0.0);
+            let shape = hit.shape.id();
+            closest = Some(Box3dCastHit {
+                entity: runtime.shape_entity(shape),
+                distance: safe_distance,
+                point: from_box3d_vec3(hit.point),
+                normal: from_box3d_vec3(hit.normal).normalize_or_zero(),
+                collision_distance,
+            });
+            hit.fraction
+        },
+    );
+    closest
+}
+
+fn box3d_character_points(cfg: &Box3dCharacterController) -> [box3d::Vec3; 2] {
+    let half_segment = (cfg.height * 0.5 - cfg.radius).max(0.0);
+    [
+        box3d::Vec3::new(0.0, -half_segment, 0.0),
+        box3d::Vec3::new(0.0, half_segment, 0.0),
+    ]
+}
+
+fn validate_box3d_velocity(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+) {
+    for value in state.velocity.as_mut() {
+        if !value.is_finite() {
+            *value = 0.0;
+        }
+    }
+    state.velocity = state.velocity.clamp_length_max(cfg.max_speed);
 }
 
 fn to_box3d_vec3(value: Vec3) -> box3d::Vec3 {

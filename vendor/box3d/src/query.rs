@@ -10,6 +10,7 @@ use box3d_sys as sys;
 
 use crate::{
     body::Body,
+    events::ShapeId,
     handle,
     math::{Aabb, Plane, Transform, Vec3},
     world::World,
@@ -124,6 +125,10 @@ impl ShapeRef<'_> {
             raw,
             _marker: PhantomData,
         }
+    }
+
+    pub fn id(self) -> ShapeId {
+        ShapeId::from_raw(self.raw)
     }
 
     pub fn is_valid(self) -> bool {
