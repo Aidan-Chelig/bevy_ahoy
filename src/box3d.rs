@@ -227,6 +227,9 @@ pub struct Box3dCharacterController {
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
     pub max_slides: usize,
+    pub step_size: f32,
+    pub step_down_detection_distance: f32,
+    pub min_step_ledge_space: f32,
 }
 
 impl Default for Box3dCharacterController {
@@ -249,6 +252,9 @@ impl Default for Box3dCharacterController {
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
             max_slides: 4,
+            step_size: 0.7,
+            step_down_detection_distance: 0.2,
+            min_step_ledge_space: 0.2,
         }
     }
 }
@@ -259,6 +265,8 @@ pub struct Box3dCharacterControllerState {
     pub velocity: Vec3,
     pub grounded: Option<Box3dCastHit>,
     pub last_ground: Stopwatch,
+    pub last_step_up: Stopwatch,
+    pub last_step_down: Stopwatch,
 }
 
 impl Default for Box3dCharacterControllerState {
@@ -269,6 +277,8 @@ impl Default for Box3dCharacterControllerState {
             velocity: Vec3::ZERO,
             grounded: None,
             last_ground,
+            last_step_up: max_stopwatch(),
+            last_step_down: max_stopwatch(),
         }
     }
 }
@@ -281,6 +291,12 @@ pub struct Box3dCastHit {
     pub point: Vec3,
     pub normal: Vec3,
     pub collision_distance: f32,
+}
+
+fn max_stopwatch() -> Stopwatch {
+    let mut watch = Stopwatch::new();
+    watch.set_elapsed(Duration::MAX);
+    watch
 }
 
 /// Non-send runtime resource containing the native Box3D world.
@@ -529,6 +545,8 @@ fn run_box3d_kcc(
     let delta = time.delta_secs();
     for (cfg, mut state, mut input, look, mut transform) in &mut characters {
         state.last_ground.tick(time.delta());
+        state.last_step_up.tick(time.delta());
+        state.last_step_down.tick(time.delta());
         update_box3d_grounded(&runtime, cfg, &mut state, &transform);
 
         if state.grounded.is_none() {
@@ -547,8 +565,12 @@ fn run_box3d_kcc(
         }
 
         validate_box3d_velocity(cfg, &mut state);
-        let movement = state.velocity * delta;
-        box3d_move_and_slide(&runtime, cfg, &mut state, &mut transform, movement);
+        if state.grounded.is_some() {
+            box3d_ground_move(&runtime, cfg, &mut state, &mut transform, delta);
+        } else {
+            let movement = state.velocity * delta;
+            box3d_move_and_slide(&runtime, cfg, &mut state, &mut transform, movement);
+        }
         update_box3d_grounded(&runtime, cfg, &mut state, &transform);
 
         if state.grounded.is_some() {
@@ -560,6 +582,32 @@ fn run_box3d_kcc(
 
         validate_box3d_velocity(cfg, &mut state);
     }
+}
+
+fn box3d_ground_move(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    transform: &mut Transform,
+    delta: f32,
+) {
+    state.velocity.y = 0.0;
+    let mut movement = state.velocity * delta;
+    movement.y = 0.0;
+
+    if movement.length_squared() < 0.0001 {
+        snap_box3d_to_ground(runtime, cfg, state, transform);
+        return;
+    }
+
+    if cast_box3d_character(runtime, cfg, transform.translation, movement).is_none() {
+        transform.translation += movement;
+        snap_box3d_to_ground(runtime, cfg, state, transform);
+        return;
+    }
+
+    box3d_step_move(runtime, cfg, state, transform, movement);
+    snap_box3d_to_ground(runtime, cfg, state, transform);
 }
 
 fn handle_box3d_jump(
@@ -685,6 +733,92 @@ fn box3d_move_and_slide(
         remaining -= traveled;
         let blocked = remaining.dot(hit.normal).min(0.0);
         remaining -= blocked * hit.normal;
+    }
+}
+
+fn box3d_step_move(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    transform: &mut Transform,
+    movement: Vec3,
+) {
+    let original_position = transform.translation;
+    let original_velocity = state.velocity;
+
+    box3d_move_and_slide(runtime, cfg, state, transform, movement);
+    let down_position = transform.translation;
+    let down_velocity = state.velocity;
+
+    transform.translation = original_position;
+    state.velocity = original_velocity;
+
+    let up = Vec3::Y * cfg.step_size;
+    let up_distance = cast_box3d_character(runtime, cfg, transform.translation, up)
+        .map(|hit| hit.distance)
+        .unwrap_or(cfg.step_size);
+    transform.translation.y += up_distance;
+
+    let forward_probe = state.velocity.normalize_or_zero() * cfg.min_step_ledge_space;
+    if cast_box3d_character(runtime, cfg, transform.translation, forward_probe).is_some() {
+        transform.translation = down_position;
+        state.velocity = down_velocity;
+        return;
+    }
+
+    box3d_move_and_slide(runtime, cfg, state, transform, movement);
+
+    let down = Vec3::NEG_Y * cfg.step_size;
+    let Some(down_hit) = cast_box3d_character(runtime, cfg, transform.translation, down) else {
+        transform.translation = down_position;
+        state.velocity = down_velocity;
+        return;
+    };
+    if down_hit.normal.y < cfg.min_walk_cos {
+        transform.translation = down_position;
+        state.velocity = down_velocity;
+        return;
+    }
+
+    transform.translation.y -= down_hit.distance;
+    let up_position = transform.translation;
+    let down_dist = down_position.xz().distance_squared(original_position.xz());
+    let up_dist = up_position.xz().distance_squared(original_position.xz());
+
+    if down_dist >= up_dist {
+        transform.translation = down_position;
+        state.velocity = down_velocity;
+    } else {
+        state.velocity.y = down_velocity.y;
+        state.last_step_up.reset();
+    }
+}
+
+fn snap_box3d_to_ground(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    transform: &mut Transform,
+) {
+    let up = Vec3::Y * cfg.ground_distance;
+    let up_distance = cast_box3d_character(runtime, cfg, transform.translation, up)
+        .map(|hit| hit.distance)
+        .unwrap_or(cfg.ground_distance);
+
+    let original_position = transform.translation;
+    let start = transform.translation + Vec3::Y * up_distance;
+    let down_distance = up_distance + cfg.step_size;
+
+    let Some(hit) = cast_box3d_character(runtime, cfg, start, Vec3::NEG_Y * down_distance) else {
+        return;
+    };
+    if hit.normal.y < cfg.min_walk_cos || hit.distance <= cfg.ground_distance {
+        return;
+    }
+
+    transform.translation = start + Vec3::NEG_Y * hit.distance;
+    if original_position.y - transform.translation.y > cfg.step_down_detection_distance {
+        state.last_step_down.reset();
     }
 }
 
