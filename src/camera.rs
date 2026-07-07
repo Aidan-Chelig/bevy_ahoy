@@ -9,6 +9,9 @@ use crate::{
     kcc::spin_character_look, prelude::*,
 };
 
+#[cfg(feature = "box3d")]
+use crate::box3d::{Box3dCharacterController, Box3dCharacterControllerState};
+
 pub struct AhoyCameraPlugin;
 
 impl Plugin for AhoyCameraPlugin {
@@ -26,6 +29,14 @@ impl Plugin for AhoyCameraPlugin {
         )
         .add_observer(rotate_camera)
         .add_observer(yank_camera);
+
+        #[cfg(feature = "box3d")]
+        app.add_systems(
+            RunFixedMainLoop,
+            sync_box3d_camera_transform
+                .after(TransformEasingSystems::UpdateEasingTick)
+                .after(sync_camera_transform),
+        );
     }
 }
 
@@ -115,34 +126,79 @@ pub(crate) fn sync_camera_transform(
             };
             let new_translation =
                 kcc_transform.translation + Vec3::Y * (-height / 2.0 + view_height);
-            camera_transform.translation.x = new_translation.x;
-            camera_transform.translation.z = new_translation.z;
-            if !camera.enable_smoothing {
-                camera_transform.translation.y = new_translation.y;
-                return;
-            }
-            if state.last_step_up.elapsed() < camera.step_smooth_time
-                || state.last_step_down.elapsed() < camera.step_smooth_time
-            {
-                let decay_rate = f32::ln(100000.0);
-                camera_transform.translation.y.smooth_nudge(
-                    &new_translation.y,
-                    decay_rate,
-                    time.delta_secs(),
-                );
-            } else if new_translation.y - camera_transform.translation.y
-                < camera.teleport_detection_distance
-            {
-                let decay_rate = f32::ln(100_000_000.0);
-                camera_transform.translation.y.smooth_nudge(
-                    &new_translation.y,
-                    decay_rate,
-                    time.delta_secs(),
-                );
-            } else {
-                camera_transform.translation.y = new_translation.y;
-            }
+            sync_camera_translation(
+                &mut camera_transform,
+                camera,
+                new_translation,
+                state.last_step_up.elapsed(),
+                state.last_step_down.elapsed(),
+                &time,
+            );
         }
+    }
+}
+
+#[cfg(feature = "box3d")]
+pub(crate) fn sync_box3d_camera_transform(
+    mut cameras: Query<
+        (&mut Transform, &CharacterControllerCameraOf),
+        (Without<Box3dCharacterControllerState>,),
+    >,
+    kccs: Query<(
+        &Transform,
+        &Box3dCharacterController,
+        &Box3dCharacterControllerState,
+    )>,
+    time: Res<Time>,
+) {
+    for (mut camera_transform, camera) in cameras.iter_mut() {
+        if let Ok((kcc_transform, cfg, state)) = kccs.get(camera.character_controller) {
+            let new_translation =
+                kcc_transform.translation + Vec3::Y * (-cfg.height / 2.0 + cfg.view_height);
+            sync_camera_translation(
+                &mut camera_transform,
+                camera,
+                new_translation,
+                state.last_step_up.elapsed(),
+                state.last_step_down.elapsed(),
+                &time,
+            );
+        }
+    }
+}
+
+fn sync_camera_translation(
+    camera_transform: &mut Transform,
+    camera: &CharacterControllerCameraOf,
+    new_translation: Vec3,
+    last_step_up: Duration,
+    last_step_down: Duration,
+    time: &Time,
+) {
+    camera_transform.translation.x = new_translation.x;
+    camera_transform.translation.z = new_translation.z;
+    if !camera.enable_smoothing {
+        camera_transform.translation.y = new_translation.y;
+        return;
+    }
+    if last_step_up < camera.step_smooth_time || last_step_down < camera.step_smooth_time {
+        let decay_rate = f32::ln(100000.0);
+        camera_transform.translation.y.smooth_nudge(
+            &new_translation.y,
+            decay_rate,
+            time.delta_secs(),
+        );
+    } else if new_translation.y - camera_transform.translation.y
+        < camera.teleport_detection_distance
+    {
+        let decay_rate = f32::ln(100_000_000.0);
+        camera_transform.translation.y.smooth_nudge(
+            &new_translation.y,
+            decay_rate,
+            time.delta_secs(),
+        );
+    } else {
+        camera_transform.translation.y = new_translation.y;
     }
 }
 

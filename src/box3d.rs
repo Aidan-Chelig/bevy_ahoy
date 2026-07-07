@@ -212,6 +212,7 @@ pub struct AhoyBox3dShape {
 pub struct Box3dCharacterController {
     pub height: f32,
     pub radius: f32,
+    pub view_height: f32,
     pub ground_distance: f32,
     pub min_walk_cos: f32,
     pub stop_speed: f32,
@@ -237,6 +238,7 @@ impl Default for Box3dCharacterController {
         Self {
             height: 1.8,
             radius: 0.7,
+            view_height: 1.7,
             ground_distance: 0.05,
             min_walk_cos: 40.0_f32.to_radians().cos(),
             stop_speed: 2.54,

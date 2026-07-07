@@ -6,11 +6,11 @@ use bevy::{
 use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
+    camera::AhoyCameraPlugin,
     input::{Jump, Movement, RotateCamera},
-    prelude::CharacterLook,
+    prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
-use std::f32::consts::TAU;
 
 fn main() -> AppExit {
     App::new()
@@ -19,6 +19,7 @@ fn main() -> AppExit {
             EnhancedInputPlugin,
             AhoyFixedUpdateUtilsPlugin,
             AhoyInputPlugin,
+            AhoyCameraPlugin,
             AhoyBox3dPlugin {
                 config: AhoyBox3dConfig {
                     gravity: Vec3::new(0.0, -9.8, 0.0),
@@ -27,14 +28,12 @@ fn main() -> AppExit {
             },
         ))
         .add_input_context::<PlayerInput>()
-        .add_observer(rotate_player_look)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 capture_cursor.run_if(input_just_pressed(MouseButton::Left)),
                 release_cursor.run_if(input_just_pressed(KeyCode::Escape)),
-                sync_camera_to_player,
             ),
         )
         .run()
@@ -45,11 +44,6 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 2.0, 8.0),
-        PlayerCamera,
-    ));
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
@@ -94,28 +88,36 @@ fn setup(
         Color::srgb(0.3, 0.35, 0.4),
     );
 
+    let player = commands
+        .spawn((
+            Transform::from_xyz(0.0, 2.0, 6.0),
+            Box3dCharacterController::default(),
+            PlayerInput,
+            actions!(PlayerInput[
+                (
+                    Action::<Movement>::new(),
+                    DeadZone::default(),
+                    Bindings::spawn((Cardinal::wasd_keys(), Axial::left_stick()))
+                ),
+                (
+                    Action::<Jump>::new(),
+                    bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<RotateCamera>::new(),
+                    Bindings::spawn((
+                        Spawn((Binding::mouse_motion(), Scale::splat(0.07))),
+                        Axial::right_stick().with((Scale::splat(4.0), DeadZone::default())),
+                    ))
+                ),
+            ]),
+        ))
+        .id();
+
     commands.spawn((
-        Transform::from_xyz(0.0, 2.0, 6.0),
-        Box3dCharacterController::default(),
-        PlayerInput,
-        actions!(PlayerInput[
-            (
-                Action::<Movement>::new(),
-                DeadZone::default(),
-                Bindings::spawn((Cardinal::wasd_keys(), Axial::left_stick()))
-            ),
-            (
-                Action::<Jump>::new(),
-                bindings![KeyCode::Space, GamepadButton::South],
-            ),
-            (
-                Action::<RotateCamera>::new(),
-                Bindings::spawn((
-                    Spawn((Binding::mouse_motion(), Scale::splat(0.07))),
-                    Axial::right_stick().with((Scale::splat(4.0), DeadZone::default())),
-                ))
-            ),
-        ]),
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 2.0, 8.0),
+        CharacterControllerCameraOf::new(player),
     ));
 }
 
@@ -136,33 +138,8 @@ fn spawn_box(
     ));
 }
 
-#[derive(Component)]
-struct PlayerCamera;
-
 #[derive(Component, Default)]
 struct PlayerInput;
-
-fn rotate_player_look(
-    rotate: On<Fire<RotateCamera>>,
-    mut looks: Query<&mut CharacterLook, With<Box3dCharacterController>>,
-) {
-    let Ok(mut look) = looks.get_mut(rotate.context) else {
-        return;
-    };
-    let delta = -rotate.value;
-    look.yaw += delta.x.to_radians();
-    look.pitch += delta.y.to_radians();
-    look.pitch = look.pitch.clamp(-TAU / 4.0 + 0.01, TAU / 4.0 - 0.01);
-}
-
-fn sync_camera_to_player(
-    player: Single<(&Transform, &CharacterLook), With<Box3dCharacterController>>,
-    mut camera: Single<&mut Transform, (With<PlayerCamera>, Without<Box3dCharacterController>)>,
-) {
-    let (player_transform, look) = *player;
-    camera.translation = player_transform.translation + Vec3::Y * 0.6;
-    camera.rotation = look.to_quat();
-}
 
 fn capture_cursor(mut cursor: Single<&mut CursorOptions>) {
     cursor.grab_mode = CursorGrabMode::Locked;
