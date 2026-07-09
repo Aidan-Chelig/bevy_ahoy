@@ -7,7 +7,7 @@ use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
     camera::AhoyCameraPlugin,
-    input::{Crouch, Jump, Movement, RotateCamera},
+    input::{Crouch, Jump, Movement, RotateCamera, SwimUp},
     prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
@@ -127,6 +127,16 @@ fn setup(
             right: 3.0,
         },
     ));
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(5.0, 2.0, 5.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.08, 0.42, 0.68, 0.35),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::from_xyz(7.0, 1.0, 5.0),
+        Box3dWater::cuboid(Vec3::new(2.5, 1.0, 2.5)),
+    ));
 
     let player = commands
         .spawn((
@@ -141,6 +151,10 @@ fn setup(
                 ),
                 (
                     Action::<Jump>::new(),
+                    bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<SwimUp>::new(),
                     bindings![KeyCode::Space, GamepadButton::South],
                 ),
                 (

@@ -21,7 +21,10 @@ use core::time::Duration;
 use std::collections::HashMap;
 
 use crate::{
-    CharacterControllerOutput, CharacterLook, TouchingEntity, input::AccumulatedInput, kcc,
+    CharacterControllerOutput, CharacterLook, TouchingEntity,
+    input::AccumulatedInput,
+    kcc,
+    water::{WaterLevel, WaterState},
 };
 
 pub use ::bevy_box3d;
@@ -34,7 +37,7 @@ pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
-        Box3dCharacterControllerState, Box3dColliderShape, Box3dRuntime,
+        Box3dCharacterControllerState, Box3dColliderShape, Box3dRuntime, Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -194,6 +197,23 @@ impl AhoyBox3dVelocity {
     }
 }
 
+/// Non-solid oriented cuboid water volume used by the Box3D controller.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[require(Transform)]
+pub struct Box3dWater {
+    pub half_extents: Vec3,
+    pub speed: f32,
+}
+
+impl Box3dWater {
+    pub const fn cuboid(half_extents: Vec3) -> Self {
+        Self {
+            half_extents,
+            speed: f32::MAX,
+        }
+    }
+}
+
 /// Native Box3D body handle for an entity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Component)]
 pub struct AhoyBox3dNativeBody {
@@ -212,6 +232,7 @@ pub struct AhoyBox3dShape {
     AccumulatedInput,
     Box3dCharacterControllerState,
     CharacterControllerOutput,
+    WaterState,
     Transform,
     CharacterLook
 )]
@@ -228,6 +249,9 @@ pub struct Box3dCharacterController {
     pub friction_hz: f32,
     pub acceleration_hz: f32,
     pub air_acceleration_hz: f32,
+    pub water_acceleration_hz: f32,
+    pub water_slowdown: f32,
+    pub water_gravity: f32,
     pub gravity: f32,
     pub speed: f32,
     pub max_speed: f32,
@@ -258,6 +282,9 @@ impl Default for Box3dCharacterController {
             friction_hz: 12.0,
             acceleration_hz: 8.0,
             air_acceleration_hz: 12.0,
+            water_acceleration_hz: 12.0,
+            water_slowdown: 0.6,
+            water_gravity: 2.4,
             gravity: 29.0,
             speed: 12.0,
             max_speed: 100.0,
@@ -556,17 +583,19 @@ fn writeback_box3d_transforms(
 fn run_box3d_kcc(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
+    waters: Query<(&Box3dWater, &Transform), Without<Box3dCharacterController>>,
     mut characters: Query<(
         &Box3dCharacterController,
         &mut Box3dCharacterControllerState,
         &mut AccumulatedInput,
         &CharacterLook,
+        &mut WaterState,
         &mut CharacterControllerOutput,
         &mut Transform,
     )>,
 ) {
     let delta = time.delta_secs();
-    for (cfg, mut state, mut input, look, mut output, mut transform) in &mut characters {
+    for (cfg, mut state, mut input, look, mut water, mut output, mut transform) in &mut characters {
         output.mantle = None;
         output.touching_entities.clear();
         state.last_ground.tick(time.delta());
@@ -575,15 +604,22 @@ fn run_box3d_kcc(
         depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
         handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
+        update_box3d_water(cfg, &state, &transform, &waters, &mut water);
+        if water.level > WaterLevel::Feet {
+            state.grounded = None;
+        }
 
-        if state.grounded.is_none() {
+        if state.grounded.is_none() && water.level <= WaterLevel::Feet {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
         }
 
         handle_box3d_jump(cfg, &mut state, &mut input);
 
         let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
-        if state.grounded.is_some() {
+        if water.level > WaterLevel::Feet {
+            apply_box3d_water_friction(cfg, &mut state, delta);
+            prepare_box3d_water_velocity(cfg, &mut state, &mut input, look, delta);
+        } else if state.grounded.is_some() {
             apply_box3d_friction(&runtime, cfg, &mut state, delta);
             box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
             state.velocity.y = state.velocity.y.min(0.0);
@@ -592,7 +628,16 @@ fn run_box3d_kcc(
         }
 
         validate_box3d_velocity(cfg, &mut state);
-        if state.grounded.is_some() {
+        if water.level > WaterLevel::Feet {
+            box3d_water_move(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+        } else if state.grounded.is_some() {
             box3d_ground_move(
                 &runtime,
                 cfg,
@@ -613,11 +658,14 @@ fn run_box3d_kcc(
             );
         }
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
+        if water.level > WaterLevel::Feet {
+            state.grounded = None;
+        }
 
         if state.grounded.is_some() {
             state.velocity.y = 0.0;
             state.last_ground.reset();
-        } else {
+        } else if water.level <= WaterLevel::Feet {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
         }
 
@@ -747,6 +795,76 @@ fn box3d_wish_velocity(
     wish_velocity.normalize_or_zero() * speed
 }
 
+fn box3d_3d_wish_velocity(
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    input: &AccumulatedInput,
+    look: &CharacterLook,
+) -> Vec3 {
+    let movement = input.last_movement.unwrap_or_default();
+    let wish_velocity =
+        movement.y * kcc::forward(look.to_quat()) + movement.x * kcc::right(look.to_quat());
+    let speed = if state.crouching {
+        cfg.speed * cfg.crouch_speed_scale
+    } else {
+        cfg.speed
+    };
+    wish_velocity.normalize_or_zero() * speed
+}
+
+fn prepare_box3d_water_velocity(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    look: &CharacterLook,
+    delta: f32,
+) {
+    let mut wish_velocity = box3d_3d_wish_velocity(cfg, state, input, look);
+    if input.swim_up {
+        input.swim_up = false;
+        wish_velocity += Vec3::Y * cfg.speed;
+    }
+    wish_velocity = wish_velocity.clamp_length_max(cfg.speed);
+    if wish_velocity == Vec3::ZERO {
+        wish_velocity -= Vec3::Y * cfg.water_gravity;
+    }
+    wish_velocity *= cfg.water_slowdown;
+
+    box3d_water_accelerate(cfg, state, wish_velocity, delta);
+}
+
+fn box3d_water_move(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
+    transform: &mut Transform,
+    delta: f32,
+) {
+    state.velocity += state.platform_velocity;
+    let movement = state.velocity * delta;
+    box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
+    state.velocity -= state.platform_velocity;
+}
+
+fn box3d_water_accelerate(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    wish_velocity: Vec3,
+    delta: f32,
+) {
+    let Ok((wish_dir, wish_speed)) = Dir3::new_and_length(wish_velocity) else {
+        return;
+    };
+    let current_speed = state.velocity.dot(*wish_dir);
+    let add_speed = wish_speed - current_speed;
+    if add_speed <= 0.0 {
+        return;
+    }
+    let accel_speed = (wish_speed * cfg.water_acceleration_hz * delta).min(add_speed);
+    state.velocity += accel_speed * wish_dir;
+}
+
 fn box3d_ground_accelerate(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
@@ -807,6 +925,22 @@ fn apply_box3d_friction(
     if new_speed != speed {
         state.velocity.x *= new_speed / speed;
         state.velocity.z *= new_speed / speed;
+    }
+}
+
+fn apply_box3d_water_friction(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    delta: f32,
+) {
+    let speed = state.velocity.length();
+    if speed < 0.001 {
+        return;
+    }
+    let control = speed.max(cfg.stop_speed);
+    let new_speed = (speed - control * cfg.friction_hz * delta).max(0.0);
+    if new_speed != speed {
+        state.velocity *= new_speed / speed;
     }
 }
 
@@ -1022,6 +1156,52 @@ fn update_box3d_platform_velocity(
     state.platform_angular_velocity = from_box3d_vec3(body.angular_velocity());
 }
 
+fn update_box3d_water(
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    transform: &Transform,
+    waters: &Query<(&Box3dWater, &Transform), Without<Box3dCharacterController>>,
+    water_state: &mut WaterState,
+) {
+    water_state.level = WaterLevel::None;
+    water_state.speed = f32::MAX;
+
+    let feet = transform.translation + Vec3::NEG_Y * (cfg.height * 0.5 - cfg.ground_distance);
+    let active_height = if state.crouching {
+        cfg.crouch_height.max(cfg.radius * 2.0)
+    } else {
+        cfg.height
+    };
+    let waist = feet + Vec3::Y * active_height * 0.5;
+    let view_height = if state.crouching {
+        cfg.crouch_view_height
+    } else {
+        cfg.view_height
+    };
+    let eye = feet + Vec3::Y * view_height;
+
+    for (water, water_transform) in waters {
+        let level = if box3d_water_contains(water, water_transform, eye) {
+            WaterLevel::Head
+        } else if box3d_water_contains(water, water_transform, waist) {
+            WaterLevel::Waist
+        } else if box3d_water_contains(water, water_transform, feet) {
+            WaterLevel::Feet
+        } else {
+            WaterLevel::None
+        };
+        if level != WaterLevel::None {
+            water_state.level = water_state.level.max(level);
+            water_state.speed = water_state.speed.min(water.speed);
+        }
+    }
+}
+
+fn box3d_water_contains(water: &Box3dWater, transform: &Transform, point: Vec3) -> bool {
+    let local_point = transform.compute_affine().inverse().transform_point3(point);
+    local_point.abs().cmple(water.half_extents).all()
+}
+
 fn handle_box3d_crouching(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
@@ -1201,6 +1381,25 @@ mod tests {
 
         assert!(box3d_character_intersects(&runtime, &cfg, origin, false));
         assert!(!box3d_character_intersects(&runtime, &cfg, origin, true));
+    }
+
+    #[test]
+    fn water_volume_respects_transform() {
+        let water = Box3dWater::cuboid(Vec3::new(2.0, 1.0, 0.5));
+        let transform = Transform::from_xyz(3.0, 2.0, -1.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::new(1.0, 2.0, 1.0));
+
+        assert!(box3d_water_contains(
+            &water,
+            &transform,
+            transform.transform_point(Vec3::new(1.5, 0.75, 0.25))
+        ));
+        assert!(!box3d_water_contains(
+            &water,
+            &transform,
+            transform.transform_point(Vec3::new(2.1, 0.0, 0.0))
+        ));
     }
 }
 
