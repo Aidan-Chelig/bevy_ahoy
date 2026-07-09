@@ -257,6 +257,11 @@ pub struct Box3dCharacterController {
     pub max_speed: f32,
     pub max_air_wish_speed: f32,
     pub jump_height: f32,
+    pub tac_power: f32,
+    pub tac_jump_factor: f32,
+    pub tac_input_buffer: Duration,
+    pub max_tac_cos: f32,
+    pub tac_cooldown: Duration,
     pub coyote_time: Duration,
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
@@ -290,6 +295,11 @@ impl Default for Box3dCharacterController {
             max_speed: 100.0,
             max_air_wish_speed: 0.76,
             jump_height: 1.8,
+            tac_power: 0.755,
+            tac_jump_factor: 1.0,
+            tac_input_buffer: Duration::from_millis(150),
+            max_tac_cos: 40.0_f32.to_radians().cos(),
+            tac_cooldown: Duration::from_millis(300),
             coyote_time: Duration::from_millis(100),
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
@@ -310,7 +320,9 @@ pub struct Box3dCharacterControllerState {
     pub platform_angular_velocity: Vec3,
     pub grounded: Option<Box3dCastHit>,
     pub crouching: bool,
+    pub tac_velocity: f32,
     pub last_ground: Stopwatch,
+    pub last_tac: Stopwatch,
     pub last_step_up: Stopwatch,
     pub last_step_down: Stopwatch,
 }
@@ -325,7 +337,9 @@ impl Default for Box3dCharacterControllerState {
             platform_angular_velocity: Vec3::ZERO,
             grounded: None,
             crouching: false,
+            tac_velocity: 0.0,
             last_ground,
+            last_tac: max_stopwatch(),
             last_step_up: max_stopwatch(),
             last_step_down: max_stopwatch(),
         }
@@ -599,8 +613,10 @@ fn run_box3d_kcc(
         output.mantle = None;
         output.touching_entities.clear();
         state.last_ground.tick(time.delta());
+        state.last_tac.tick(time.delta());
         state.last_step_up.tick(time.delta());
         state.last_step_down.tick(time.delta());
+        state.tac_velocity *= 0.99;
         depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
         handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
@@ -613,9 +629,16 @@ fn run_box3d_kcc(
             state.velocity.y -= cfg.gravity * 0.5 * delta;
         }
 
-        handle_box3d_jump(cfg, &mut state, &mut input);
-
         let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
+        handle_box3d_jump(
+            &runtime,
+            cfg,
+            &mut state,
+            &mut input,
+            &transform,
+            wish_velocity,
+            delta,
+        );
         if water.level > WaterLevel::Feet {
             apply_box3d_water_friction(cfg, &mut state, delta);
             prepare_box3d_water_velocity(cfg, &mut state, &mut input, look, delta);
@@ -752,24 +775,104 @@ fn box3d_ground_move(
 }
 
 fn handle_box3d_jump(
+    runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     input: &mut AccumulatedInput,
+    transform: &Transform,
+    wish_velocity: Vec3,
+    delta: f32,
 ) {
-    if state.grounded.is_none() && state.last_ground.elapsed() > cfg.coyote_time {
-        return;
-    }
-    let Some(jump_time) = input.jumped.clone() else {
-        return;
-    };
-    if jump_time.elapsed() > cfg.jump_input_buffer {
-        return;
-    }
+    let jump_direction =
+        if state.grounded.is_none() && state.last_ground.elapsed() > cfg.coyote_time {
+            let Some(direction) =
+                handle_box3d_tac(runtime, cfg, state, input, transform, wish_velocity, delta)
+            else {
+                return;
+            };
+            direction
+        } else {
+            let Some(jump_time) = input.jumped.clone() else {
+                return;
+            };
+            if jump_time.elapsed() > cfg.jump_input_buffer {
+                return;
+            }
+            state.grounded = None;
+            state.last_ground.set_elapsed(cfg.coyote_time);
+            Vec3::Y
+        };
 
     input.jumped = None;
-    state.grounded = None;
-    state.last_ground.set_elapsed(cfg.coyote_time);
-    state.velocity.y += (2.0 * cfg.gravity * cfg.jump_height).sqrt() + state.platform_velocity.y;
+    input.tac = None;
+    state.last_tac.reset();
+    state.velocity += jump_direction * (2.0 * cfg.gravity * cfg.jump_height).sqrt()
+        + Vec3::Y * state.platform_velocity.y;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_box3d_tac(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &AccumulatedInput,
+    transform: &Transform,
+    wish_velocity: Vec3,
+    delta: f32,
+) -> Option<Vec3> {
+    let tac_time = input.tac.as_ref()?;
+    if tac_time.elapsed() > cfg.tac_input_buffer
+        || wish_velocity.length_squared() < 0.1
+        || state.last_tac.elapsed() < cfg.tac_cooldown
+    {
+        return None;
+    }
+
+    let normal = cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        state.velocity * delta,
+    )
+    .or_else(|| {
+        cast_box3d_character(
+            runtime,
+            cfg,
+            state,
+            transform.translation,
+            wish_velocity * delta,
+        )
+    })?
+    .normal;
+
+    calculate_box3d_tac_direction(cfg, state, normal, wish_velocity)
+}
+
+fn calculate_box3d_tac_direction(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    normal: Vec3,
+    wish_velocity: Vec3,
+) -> Option<Vec3> {
+    if normal.y < -0.01 {
+        return None;
+    }
+
+    let wish_unit = wish_velocity.normalize();
+    let wish_dot = wish_unit.dot(normal);
+    if -wish_dot > cfg.max_tac_cos {
+        return None;
+    }
+
+    let vel_dot = state.velocity.dot(normal).min(0.0);
+    state.velocity -= vel_dot * normal;
+    let groundedness = state.tac_velocity.max(vel_dot).min(1.0);
+    state.tac_velocity = 0.0;
+    let flat_normal = Vec3::new(normal.x, 0.0, normal.z);
+    let tac_wish = wish_unit - (wish_dot.min(0.0) - 1.0) * flat_normal;
+    let tac_direction = (Vec3::Y * cfg.tac_jump_factor + tac_wish).normalize_or_zero();
+    Some(tac_direction * groundedness * cfg.tac_power)
 }
 
 fn box3d_wish_velocity(
@@ -973,6 +1076,7 @@ fn box3d_move_and_slide(
 
         let into_plane = state.velocity.dot(hit.normal).min(0.0);
         state.velocity -= into_plane * hit.normal;
+        state.tac_velocity += -into_plane;
 
         let traveled = direction * travel;
         remaining -= traveled;
@@ -991,15 +1095,18 @@ fn box3d_step_move(
 ) {
     let original_position = transform.translation;
     let original_velocity = state.velocity;
+    let original_tac_velocity = state.tac_velocity;
     let original_touching_entities = output.touching_entities.clone();
 
     box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
     let down_touching_entities = output.touching_entities.clone();
     let down_position = transform.translation;
     let down_velocity = state.velocity;
+    let down_tac_velocity = state.tac_velocity;
 
     transform.translation = original_position;
     state.velocity = original_velocity;
+    state.tac_velocity = original_tac_velocity;
     output.touching_entities = original_touching_entities;
 
     let up = Vec3::Y * cfg.step_size;
@@ -1012,6 +1119,7 @@ fn box3d_step_move(
     if cast_box3d_character(runtime, cfg, state, transform.translation, forward_probe).is_some() {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     }
@@ -1023,12 +1131,14 @@ fn box3d_step_move(
     else {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     };
     if down_hit.normal.y < cfg.min_walk_cos {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     }
@@ -1042,6 +1152,7 @@ fn box3d_step_move(
     if down_dist >= up_dist {
         transform.translation = down_position;
         state.velocity = down_velocity;
+        state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
     } else {
         state.velocity.y = down_velocity.y;
@@ -1400,6 +1511,40 @@ mod tests {
             &transform,
             transform.transform_point(Vec3::new(2.1, 0.0, 0.0))
         ));
+    }
+
+    #[test]
+    fn tac_redirects_glancing_movement_away_from_wall() {
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            tac_velocity: 1.0,
+            ..Default::default()
+        };
+        let direction = calculate_box3d_tac_direction(
+            &cfg,
+            &mut state,
+            Vec3::NEG_X,
+            Vec3::new(0.5, 0.0, 0.866),
+        )
+        .unwrap();
+
+        assert!(direction.x < 0.0);
+        assert!(direction.y > 0.0);
+        assert!(direction.z > 0.0);
+        assert!((direction.length() - cfg.tac_power).abs() < 0.0001);
+        assert_eq!(state.tac_velocity, 0.0);
+    }
+
+    #[test]
+    fn tac_rejects_head_on_wall_approach() {
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            tac_velocity: 1.0,
+            ..Default::default()
+        };
+
+        assert!(calculate_box3d_tac_direction(&cfg, &mut state, Vec3::NEG_X, Vec3::X).is_none());
+        assert_eq!(state.tac_velocity, 1.0);
     }
 }
 
