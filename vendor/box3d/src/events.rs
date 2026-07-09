@@ -265,6 +265,11 @@ impl ShapeId {
         unsafe { sys::b3Shape_SetSurfaceMaterial(self.raw, material.into()) };
     }
 
+    pub fn friction(self) -> f32 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Shape_GetFriction(self.raw) }
+    }
+
     pub fn enable_contact_events(self, enabled: bool) {
         assert!(self.is_valid());
         unsafe { sys::b3Shape_EnableContactEvents(self.raw, enabled) };

@@ -575,7 +575,7 @@ fn run_box3d_kcc(
 
         let wish_velocity = box3d_wish_velocity(cfg, &input, look);
         if state.grounded.is_some() {
-            apply_box3d_friction(cfg, &mut state, delta);
+            apply_box3d_friction(&runtime, cfg, &mut state, delta);
             box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
             state.velocity.y = state.velocity.y.min(0.0);
         } else {
@@ -770,6 +770,7 @@ fn box3d_air_accelerate(
 }
 
 fn apply_box3d_friction(
+    runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     delta: f32,
@@ -779,7 +780,14 @@ fn apply_box3d_friction(
         return;
     }
     let control = speed.max(cfg.stop_speed);
-    let drop = control * cfg.friction_hz * delta;
+    let surface_friction = state
+        .grounded
+        .and_then(|ground| ground.entity)
+        .and_then(|entity| runtime.shape(entity))
+        .filter(|shape| shape.is_valid())
+        .map(|shape| shape.friction())
+        .unwrap_or(1.0);
+    let drop = control * cfg.friction_hz * surface_friction * delta;
     let new_speed = (speed - drop).max(0.0);
     if new_speed != speed {
         state.velocity.x *= new_speed / speed;

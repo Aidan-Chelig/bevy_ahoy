@@ -88,6 +88,15 @@ fn setup(
         Transform::from_xyz(-8.0, 1.0, 0.0),
         Color::srgb(0.3, 0.35, 0.4),
     );
+    spawn_box_with_friction(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(5.0, 0.08, 5.0),
+        Transform::from_xyz(6.0, 0.04, -6.0),
+        Color::srgb(0.45, 0.72, 0.82),
+        0.05,
+    );
     for i in 0..4 {
         spawn_dynamic_box(
             &mut commands,
@@ -168,12 +177,26 @@ fn spawn_box(
     transform: Transform,
     color: Color,
 ) {
+    spawn_box_with_friction(commands, meshes, materials, size, transform, color, 0.6);
+}
+
+fn spawn_box_with_friction(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    size: Vec3,
+    transform: Transform,
+    color: Color,
+    friction: f32,
+) {
+    let mut collider = AhoyBox3dCollider::cuboid(size * 0.5);
+    collider.friction = friction;
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::from_size(size))),
         MeshMaterial3d(materials.add(color)),
         transform,
         AhoyBox3dBody::STATIC,
-        AhoyBox3dCollider::cuboid(size * 0.5),
+        collider,
     ));
 }
 
