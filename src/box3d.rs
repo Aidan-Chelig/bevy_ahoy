@@ -1334,6 +1334,7 @@ fn box3d_move_and_slide(
     movement: Vec3,
 ) {
     let mut remaining = movement;
+    let mut planes = Vec::with_capacity(cfg.max_slides);
     for _ in 0..cfg.max_slides {
         if remaining.length_squared() <= f32::EPSILON {
             break;
@@ -1352,14 +1353,22 @@ fn box3d_move_and_slide(
         transform.translation += direction * travel;
         transform.translation += hit.normal * cfg.skin_width;
 
-        let into_plane = state.velocity.dot(hit.normal).min(0.0);
-        state.velocity -= into_plane * hit.normal;
-        state.tac_velocity += -into_plane;
+        if !planes.iter().any(|plane: &box3d::CollisionPlane| {
+            from_box3d_vec3(plane.plane().normal).dot(hit.normal) > 0.999
+        }) {
+            planes.push(box3d::CollisionPlane::rigid(box3d::Plane {
+                normal: to_box3d_vec3(hit.normal),
+                offset: 0.0,
+            }));
+        }
+        let old_velocity = state.velocity;
+        state.velocity =
+            from_box3d_vec3(box3d::clip_vector(to_box3d_vec3(state.velocity), &planes));
+        state.tac_velocity += (old_velocity - state.velocity).length();
 
         let traveled = direction * travel;
         remaining -= traveled;
-        let blocked = remaining.dot(hit.normal).min(0.0);
-        remaining -= blocked * hit.normal;
+        remaining = from_box3d_vec3(box3d::clip_vector(to_box3d_vec3(remaining), &planes));
     }
 }
 
@@ -1676,13 +1685,19 @@ fn cast_box3d_character(
         box3d::QueryFilter::default(),
         |hit| {
             let collision_distance = hit.fraction * distance;
+            let normal = from_box3d_vec3(hit.normal).normalize_or_zero();
+            if movement.dot(normal) >= -1.0e-4 {
+                return closest
+                    .map(|hit| hit.collision_distance / distance)
+                    .unwrap_or(1.0);
+            }
             let safe_distance = (collision_distance - cfg.skin_width).max(0.0);
             let shape = hit.shape.id();
             closest = Some(Box3dCastHit {
                 entity: runtime.shape_entity(shape),
                 distance: safe_distance,
                 point: from_box3d_vec3(hit.point),
-                normal: from_box3d_vec3(hit.normal).normalize_or_zero(),
+                normal,
                 collision_distance,
             });
             hit.fraction
@@ -1952,6 +1967,82 @@ mod tests {
         assert!(state.velocity.y > 0.0);
         assert!(state.velocity.z < 0.0);
         assert!(input.jumped.is_none());
+    }
+
+    #[test]
+    fn movement_crosses_adjacent_floor_colliders() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let left = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(-2.5, -0.5, 0.0)));
+        let _left_shape =
+            left.create_box(box3d::Vec3::new(2.5, 0.5, 5.0), box3d::ShapeDef::default());
+        let right = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                2.5, -0.4999, 0.0,
+            )));
+        let _right_shape =
+            right.create_box(box3d::Vec3::new(2.5, 0.5, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::X,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(-0.5, cfg.height * 0.5, 0.0);
+
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::X,
+        );
+
+        assert!(transform.translation.x > 0.45, "{transform:?}");
+        assert!(state.velocity.x > 0.99, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn movement_slides_across_adjacent_wall_colliders() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let front = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(1.25, 1.0, 2.5)));
+        let _front_shape =
+            front.create_box(box3d::Vec3::new(0.5, 2.0, 2.5), box3d::ShapeDef::default());
+        let back = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(1.25, 1.0, -2.5)));
+        let _back_shape =
+            back.create_box(box3d::Vec3::new(0.5, 2.0, 2.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_Z,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.05, cfg.height * 0.5, 0.5);
+
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::NEG_Z,
+        );
+
+        assert!(transform.translation.z < -0.45, "{transform:?}");
+        assert!(state.velocity.z < -0.99, "{:?}", state.velocity);
     }
 }
 
