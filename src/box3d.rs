@@ -21,7 +21,7 @@ use core::time::Duration;
 use std::collections::HashMap;
 
 use crate::{
-    CharacterControllerOutput, CharacterLook, TouchingEntity,
+    CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
     input::AccumulatedInput,
     kcc,
     water::{WaterLevel, WaterState},
@@ -37,7 +37,8 @@ pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
-        Box3dCharacterControllerState, Box3dColliderShape, Box3dRuntime, Box3dWater,
+        Box3dCharacterControllerState, Box3dColliderShape, Box3dMantleState, Box3dRuntime,
+        Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -262,6 +263,15 @@ pub struct Box3dCharacterController {
     pub tac_input_buffer: Duration,
     pub max_tac_cos: f32,
     pub tac_cooldown: Duration,
+    pub mantle_input_buffer: Duration,
+    pub mantle_height: f32,
+    pub mantle_speed: f32,
+    pub min_mantle_cos: f32,
+    pub min_mantle_ledge_space: f32,
+    pub max_ledge_grab_distance: f32,
+    pub climb_pull_up_height: f32,
+    pub ledge_jump_power: f32,
+    pub ledge_jump_factor: f32,
     pub coyote_time: Duration,
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
@@ -300,6 +310,15 @@ impl Default for Box3dCharacterController {
             tac_input_buffer: Duration::from_millis(150),
             max_tac_cos: 40.0_f32.to_radians().cos(),
             tac_cooldown: Duration::from_millis(300),
+            mantle_input_buffer: Duration::from_millis(50),
+            mantle_height: 1.0,
+            mantle_speed: 5.0,
+            min_mantle_cos: 50.0_f32.to_radians().cos(),
+            min_mantle_ledge_space: 0.5,
+            max_ledge_grab_distance: 0.3,
+            climb_pull_up_height: 0.3,
+            ledge_jump_power: 1.5,
+            ledge_jump_factor: 0.8,
             coyote_time: Duration::from_millis(100),
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
@@ -321,6 +340,7 @@ pub struct Box3dCharacterControllerState {
     pub grounded: Option<Box3dCastHit>,
     pub crouching: bool,
     pub tac_velocity: f32,
+    pub mantle: Option<Box3dMantleState>,
     pub last_ground: Stopwatch,
     pub last_tac: Stopwatch,
     pub last_step_up: Stopwatch,
@@ -338,12 +358,21 @@ impl Default for Box3dCharacterControllerState {
             grounded: None,
             crouching: false,
             tac_velocity: 0.0,
+            mantle: None,
             last_ground,
             last_tac: max_stopwatch(),
             last_step_up: max_stopwatch(),
             last_step_down: max_stopwatch(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Box3dMantleState {
+    pub wall_normal: Dir3,
+    pub ledge_position: Vec3,
+    pub wall_entity: Entity,
+    pub target_position: Vec3,
 }
 
 /// Hit data produced by Box3D character casts.
@@ -624,12 +653,34 @@ fn run_box3d_kcc(
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
+        let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
+        update_box3d_mantle_state(
+            &runtime,
+            cfg,
+            &mut state,
+            &mut input,
+            &transform,
+            wish_velocity,
+        );
+        handle_box3d_ledge_jump(cfg, &mut state, &mut input, look);
+        if state.mantle.is_some() {
+            handle_box3d_mantle_movement(
+                &runtime,
+                cfg,
+                &mut state,
+                &input,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+            validate_box3d_velocity(cfg, &mut state);
+            continue;
+        }
 
         if state.grounded.is_none() && water.level <= WaterLevel::Feet {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
         }
 
-        let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
         handle_box3d_jump(
             &runtime,
             cfg,
@@ -772,6 +823,171 @@ fn box3d_ground_move(
     box3d_step_move(runtime, cfg, state, output, transform, movement);
     state.velocity -= state.platform_velocity;
     snap_box3d_to_ground(runtime, cfg, state, transform);
+}
+
+fn update_box3d_mantle_state(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    transform: &Transform,
+    wish_velocity: Vec3,
+) {
+    if state.mantle.is_some() {
+        return;
+    }
+    let Some(mantle_time) = input.mantled.as_ref() else {
+        return;
+    };
+    if mantle_time.elapsed() > cfg.mantle_input_buffer {
+        return;
+    }
+    let Ok(wish_dir) = Dir3::new(wish_velocity) else {
+        return;
+    };
+    let Some(wall_hit) = cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        *wish_dir * cfg.max_ledge_grab_distance,
+    ) else {
+        return;
+    };
+    let Ok(wall_normal) = Dir3::new(wall_hit.normal) else {
+        return;
+    };
+    if (-wall_normal).dot(*wish_dir) < cfg.min_mantle_cos {
+        return;
+    }
+    let Some(wall_entity) = wall_hit.entity else {
+        return;
+    };
+
+    let hand_radius = 0.05;
+    let inward_distance = cfg.radius + cfg.skin_width + cfg.min_mantle_ledge_space + hand_radius;
+    let probe_start = transform.translation + Vec3::Y * (cfg.height * 0.5 + cfg.mantle_height)
+        - *wall_normal * inward_distance;
+    let probe_distance = cfg.height + cfg.mantle_height;
+    let Some(ledge_hit) = cast_box3d_sphere(
+        runtime,
+        probe_start,
+        Vec3::NEG_Y * probe_distance,
+        hand_radius,
+        cfg.skin_width,
+    ) else {
+        return;
+    };
+    if ledge_hit.normal.y < cfg.min_walk_cos {
+        return;
+    }
+
+    let feet_y = transform.translation.y - cfg.height * 0.5;
+    let ledge_height = ledge_hit.point.y - feet_y;
+    if ledge_height <= cfg.step_size || ledge_height > cfg.height + cfg.mantle_height {
+        return;
+    }
+    let target_position = Vec3::new(
+        ledge_hit.point.x,
+        ledge_hit.point.y + cfg.height * 0.5 + cfg.skin_width + cfg.climb_pull_up_height,
+        ledge_hit.point.z,
+    );
+    if box3d_character_intersects(runtime, cfg, target_position, state.crouching) {
+        return;
+    }
+
+    state.grounded = None;
+    state.velocity = Vec3::ZERO;
+    state.mantle = Some(Box3dMantleState {
+        wall_normal,
+        ledge_position: ledge_hit.point,
+        wall_entity,
+        target_position,
+    });
+    input.craned = None;
+    input.mantled = None;
+    input.jumped = None;
+}
+
+fn handle_box3d_mantle_movement(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &AccumulatedInput,
+    output: &mut CharacterControllerOutput,
+    transform: &mut Transform,
+    delta: f32,
+) {
+    let Some(mantle) = state.mantle else {
+        return;
+    };
+    output.mantle = Some(MantleOutput {
+        wall_normal: mantle.wall_normal,
+        ledge_position: mantle.ledge_position,
+        wall_entity: mantle.wall_entity,
+    });
+    state.velocity = Vec3::ZERO;
+
+    if input.last_movement.unwrap_or_default().y <= 0.0 {
+        return;
+    }
+    let to_target = mantle.target_position - transform.translation;
+    if to_target.length_squared() <= cfg.skin_width * cfg.skin_width {
+        transform.translation = mantle.target_position;
+        state.mantle = None;
+        state.last_step_up.reset();
+        return;
+    }
+
+    let vertical = Vec3::Y * to_target.y.max(0.0);
+    let desired = if vertical.length_squared() > cfg.skin_width * cfg.skin_width {
+        vertical
+    } else {
+        to_target
+    };
+    let movement = desired.clamp_length_max(cfg.mantle_speed * delta);
+    let travel = cast_box3d_character(runtime, cfg, state, transform.translation, movement)
+        .map(|hit| movement.normalize_or_zero() * hit.distance)
+        .unwrap_or(movement);
+    transform.translation += travel;
+    state.velocity = travel / delta;
+    state.last_step_up.reset();
+
+    if travel.length_squared() + f32::EPSILON < movement.length_squared() {
+        state.mantle = None;
+    }
+}
+
+fn handle_box3d_ledge_jump(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    look: &CharacterLook,
+) {
+    if state.mantle.is_none()
+        || input
+            .mantled
+            .as_ref()
+            .is_some_and(|mantle| mantle.elapsed() < cfg.mantle_input_buffer)
+        || input.jumped.is_none()
+    {
+        return;
+    }
+    let movement = input.last_movement.unwrap_or_default();
+    let direction = if movement.y >= 0.0 {
+        let forward = kcc::forward(look.to_quat());
+        let flat_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        (Vec3::Y * cfg.ledge_jump_factor + flat_forward).normalize_or_zero()
+    } else {
+        Vec3::NEG_Y
+    };
+
+    state.mantle = None;
+    state.last_tac.reset();
+    input.jumped = None;
+    input.tac = None;
+    state.velocity +=
+        direction * cfg.ledge_jump_power * (2.0 * cfg.gravity * cfg.jump_height).sqrt();
 }
 
 fn handle_box3d_jump(
@@ -1413,6 +1629,42 @@ fn cast_box3d_character(
     closest
 }
 
+fn cast_box3d_sphere(
+    runtime: &Box3dRuntime,
+    origin: Vec3,
+    movement: Vec3,
+    radius: f32,
+    skin_width: f32,
+) -> Option<Box3dCastHit> {
+    let distance = movement.length();
+    if distance <= f32::EPSILON {
+        return None;
+    }
+    let points = [box3d::Vec3::ZERO];
+    let proxy = box3d::ShapeProxy::new(&points, radius).ok()?;
+    let mut closest = None;
+    runtime.world.cast_shape(
+        to_box3d_vec3(origin),
+        proxy,
+        to_box3d_vec3(movement),
+        box3d::QueryFilter::default(),
+        |hit| {
+            let collision_distance = hit.fraction * distance;
+            let safe_distance = (collision_distance - skin_width).max(0.0);
+            let shape = hit.shape.id();
+            closest = Some(Box3dCastHit {
+                entity: runtime.shape_entity(shape),
+                distance: safe_distance,
+                point: from_box3d_vec3(hit.point),
+                normal: from_box3d_vec3(hit.normal).normalize_or_zero(),
+                collision_distance,
+            });
+            hit.fraction
+        },
+    );
+    closest
+}
+
 fn box3d_character_points(cfg: &Box3dCharacterController, crouching: bool) -> [box3d::Vec3; 2] {
     let height = if crouching {
         cfg.crouch_height
@@ -1545,6 +1797,74 @@ mod tests {
 
         assert!(calculate_box3d_tac_direction(&cfg, &mut state, Vec3::NEG_X, Vec3::X).is_none());
         assert_eq!(state.tac_velocity, 1.0);
+    }
+
+    #[test]
+    fn mantle_probe_finds_clear_ledge() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let ledge = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.75, -1.0)));
+        let ledge_shape = ledge.create_box(
+            box3d::Vec3::new(2.0, 0.75, 0.25),
+            box3d::ShapeDef::default(),
+        );
+        let ledge_entity = Entity::from_bits(42);
+        runtime
+            .shape_entities
+            .insert(ledge_shape.id().to_bits(), ledge_entity);
+
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            mantled: Some(Stopwatch::new()),
+            ..Default::default()
+        };
+        update_box3d_mantle_state(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::NEG_Z * cfg.speed,
+        );
+
+        let mantle = state.mantle.unwrap();
+        assert_eq!(mantle.wall_entity, ledge_entity);
+        assert!(mantle.target_position.y > cfg.height * 0.5);
+        assert!(input.mantled.is_none());
+    }
+
+    #[test]
+    fn ledge_jump_releases_mantle() {
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            mantle: Some(Box3dMantleState {
+                wall_normal: Dir3::Z,
+                ledge_position: Vec3::ZERO,
+                wall_entity: Entity::from_bits(42),
+                target_position: Vec3::Y,
+            }),
+            ..Default::default()
+        };
+        let mut mantle_input = Stopwatch::new();
+        mantle_input.set_elapsed(cfg.mantle_input_buffer);
+        let mut input = AccumulatedInput {
+            last_movement: Some(bevy_math::Vec2::Y),
+            jumped: Some(Stopwatch::new()),
+            mantled: Some(mantle_input),
+            ..Default::default()
+        };
+
+        handle_box3d_ledge_jump(&cfg, &mut state, &mut input, &CharacterLook::default());
+
+        assert!(state.mantle.is_none());
+        assert!(state.velocity.y > 0.0);
+        assert!(state.velocity.z < 0.0);
+        assert!(input.jumped.is_none());
     }
 }
 

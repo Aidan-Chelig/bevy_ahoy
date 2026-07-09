@@ -7,7 +7,7 @@ use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
     camera::AhoyCameraPlugin,
-    input::{Crouch, Jump, Movement, RotateCamera, SwimUp, Tac},
+    input::{Crouch, Jump, Mantle, Movement, RotateCamera, SwimUp, Tac},
     prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
@@ -88,6 +88,14 @@ fn setup(
         Transform::from_xyz(-8.0, 1.0, 0.0),
         Color::srgb(0.3, 0.35, 0.4),
     );
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(3.0, 1.5, 2.0),
+        Transform::from_xyz(0.0, 0.75, -1.5),
+        Color::srgb(0.48, 0.38, 0.3),
+    );
     spawn_box_with_friction(
         &mut commands,
         &mut meshes,
@@ -155,6 +163,11 @@ fn setup(
                 ),
                 (
                     Action::<Tac>::new(),
+                    bevy_enhanced_input::prelude::Press::default(),
+                    bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<Mantle>::new(),
                     bevy_enhanced_input::prelude::Press::default(),
                     bindings![KeyCode::Space, GamepadButton::South],
                 ),
