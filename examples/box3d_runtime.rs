@@ -197,6 +197,10 @@ fn setup(
 
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 100.0_f32.to_radians(),
+            ..default()
+        }),
         Transform::from_xyz(0.0, 2.0, 8.0),
         CharacterControllerCameraOf::new(player),
     ));
