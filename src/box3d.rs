@@ -3,12 +3,11 @@
 //! This module is enabled with the `box3d` feature and re-exports the
 //! low-level [`box3d`] crate and the Bevy adapter [`bevy_box3d`].
 //!
-//! The current Ahoy controller implementation still runs on Avian because it
-//! depends on Avian's move-and-slide queries and collider metadata. At the time
-//! this feature was added, `bevy_box3d` targets Bevy 0.19 while Ahoy targets
-//! Bevy 0.18. [`AhoyBox3dPlugin`] provides a small native Box3D runtime that
-//! compiles on Ahoy's Bevy version; [`bevy_box3d`] is re-exported for projects
-//! that can use its Bevy 0.19 integration directly.
+//! At the time this feature was added, `bevy_box3d` targets Bevy 0.19 while
+//! Ahoy targets Bevy 0.18. [`AhoyBox3dPlugin`] provides a native Box3D runtime
+//! and Source-style character controller that compile on Ahoy's Bevy version;
+//! [`bevy_box3d`] is re-exported for projects that can use its Bevy 0.19
+//! integration directly.
 
 use bevy_app::{FixedUpdate, Plugin, PostUpdate};
 use bevy_ecs::{
@@ -78,6 +77,7 @@ impl Plugin for AhoyBox3dPlugin {
                     sync_box3d_velocity_changes,
                     step_box3d,
                     run_box3d_kcc,
+                    spin_box3d_character_look,
                     apply_box3d_kcc_impulses,
                 )
                     .chain(),
@@ -273,6 +273,8 @@ impl Default for Box3dCharacterController {
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct Box3dCharacterControllerState {
     pub velocity: Vec3,
+    pub platform_velocity: Vec3,
+    pub platform_angular_velocity: Vec3,
     pub grounded: Option<Box3dCastHit>,
     pub last_ground: Stopwatch,
     pub last_step_up: Stopwatch,
@@ -285,6 +287,8 @@ impl Default for Box3dCharacterControllerState {
         last_ground.set_elapsed(Duration::MAX);
         Self {
             velocity: Vec3::ZERO,
+            platform_velocity: Vec3::ZERO,
+            platform_angular_velocity: Vec3::ZERO,
             grounded: None,
             last_ground,
             last_step_up: max_stopwatch(),
@@ -561,7 +565,7 @@ fn run_box3d_kcc(
         state.last_step_up.tick(time.delta());
         state.last_step_down.tick(time.delta());
         depenetrate_box3d_character(&runtime, cfg, &mut transform);
-        update_box3d_grounded(&runtime, cfg, &mut state, &transform);
+        update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
 
         if state.grounded.is_none() {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
@@ -599,7 +603,7 @@ fn run_box3d_kcc(
                 movement,
             );
         }
-        update_box3d_grounded(&runtime, cfg, &mut state, &transform);
+        update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
 
         if state.grounded.is_some() {
             state.velocity.y = 0.0;
@@ -609,6 +613,21 @@ fn run_box3d_kcc(
         }
 
         validate_box3d_velocity(cfg, &mut state);
+    }
+}
+
+fn spin_box3d_character_look(
+    mut characters: Query<(&Box3dCharacterControllerState, &mut CharacterLook)>,
+    time: Res<Time>,
+) {
+    for (state, mut look) in &mut characters {
+        if state.grounded.is_none() {
+            continue;
+        }
+        *look = CharacterLook::from_quat(
+            Quat::from_rotation_y(state.platform_angular_velocity.y * time.delta_secs())
+                * look.to_quat(),
+        );
     }
 }
 
@@ -652,22 +671,26 @@ fn box3d_ground_move(
     delta: f32,
 ) {
     state.velocity.y = 0.0;
+    state.velocity += state.platform_velocity;
     let mut movement = state.velocity * delta;
     movement.y = 0.0;
 
     if movement.length_squared() < 0.0001 {
+        state.velocity -= state.platform_velocity;
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
 
     if cast_box3d_character(runtime, cfg, transform.translation, movement).is_none() {
         transform.translation += movement;
+        state.velocity -= state.platform_velocity;
         depenetrate_box3d_character(runtime, cfg, transform);
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
 
     box3d_step_move(runtime, cfg, state, output, transform, movement);
+    state.velocity -= state.platform_velocity;
     snap_box3d_to_ground(runtime, cfg, state, transform);
 }
 
@@ -689,7 +712,7 @@ fn handle_box3d_jump(
     input.jumped = None;
     state.grounded = None;
     state.last_ground.set_elapsed(cfg.coyote_time);
-    state.velocity.y += (2.0 * cfg.gravity * cfg.jump_height).sqrt();
+    state.velocity.y += (2.0 * cfg.gravity * cfg.jump_height).sqrt() + state.platform_velocity.y;
 }
 
 fn box3d_wish_velocity(
@@ -924,14 +947,52 @@ fn update_box3d_grounded(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     transform: &Transform,
+    delta: f32,
 ) {
+    let cast_distance = if state.platform_velocity.y < 0.0 {
+        cfg.ground_distance - state.platform_velocity.y * delta
+    } else {
+        cfg.ground_distance
+    };
     let hit = cast_box3d_character(
         runtime,
         cfg,
         transform.translation,
-        Vec3::NEG_Y * cfg.ground_distance,
+        Vec3::NEG_Y * cast_distance,
     );
-    state.grounded = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
+    let old_ground = state.grounded;
+    let new_ground = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
+
+    if let Some(platform_hit) = new_ground.or(old_ground) {
+        update_box3d_platform_velocity(runtime, state, platform_hit);
+    }
+    state.grounded = new_ground;
+}
+
+fn update_box3d_platform_velocity(
+    runtime: &Box3dRuntime,
+    state: &mut Box3dCharacterControllerState,
+    ground: Box3dCastHit,
+) {
+    let Some(collider_entity) = ground.entity else {
+        state.platform_velocity = Vec3::ZERO;
+        state.platform_angular_velocity = Vec3::ZERO;
+        return;
+    };
+    let Some(body_entity) = runtime.shape_bodies.get(&collider_entity).copied() else {
+        state.platform_velocity = Vec3::ZERO;
+        state.platform_angular_velocity = Vec3::ZERO;
+        return;
+    };
+    let Some(body) = runtime.body(body_entity).filter(|body| body.is_valid()) else {
+        state.platform_velocity = Vec3::ZERO;
+        state.platform_angular_velocity = Vec3::ZERO;
+        return;
+    };
+
+    state.platform_velocity =
+        from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(ground.point)));
+    state.platform_angular_velocity = from_box3d_vec3(body.angular_velocity());
 }
 
 fn depenetrate_box3d_character(

@@ -36,6 +36,7 @@ fn main() -> AppExit {
                 release_cursor.run_if(input_just_pressed(KeyCode::Escape)),
             ),
         )
+        .add_systems(FixedUpdate, reverse_platform)
         .run()
 }
 
@@ -97,6 +98,18 @@ fn setup(
             Color::srgb(0.65, 0.48, 0.28),
         );
     }
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(3.0, 0.3, 3.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.25, 0.55, 0.48))),
+        Transform::from_xyz(0.0, 1.5, -7.0),
+        AhoyBox3dBody::KINEMATIC,
+        AhoyBox3dCollider::cuboid(Vec3::new(1.5, 0.15, 1.5)),
+        AhoyBox3dVelocity::linear(Vec3::X * 1.5),
+        MovingPlatform {
+            left: -3.0,
+            right: 3.0,
+        },
+    ));
 
     let player = commands
         .spawn((
@@ -129,6 +142,22 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 8.0),
         CharacterControllerCameraOf::new(player),
     ));
+}
+
+#[derive(Component)]
+struct MovingPlatform {
+    left: f32,
+    right: f32,
+}
+
+fn reverse_platform(mut platforms: Query<(&Transform, &MovingPlatform, &mut AhoyBox3dVelocity)>) {
+    for (transform, platform, mut velocity) in &mut platforms {
+        if (transform.translation.x >= platform.right && velocity.linear.x > 0.0)
+            || (transform.translation.x <= platform.left && velocity.linear.x < 0.0)
+        {
+            velocity.linear.x = -velocity.linear.x;
+        }
+    }
 }
 
 fn spawn_box(
