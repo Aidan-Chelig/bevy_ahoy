@@ -18,7 +18,7 @@ use bevy_math::{Dir3, Quat, Vec3, Vec3Swizzles};
 use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
 use core::time::Duration;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
@@ -787,10 +787,14 @@ fn apply_box3d_kcc_impulses(
     characters: Query<(&Box3dCharacterController, &CharacterControllerOutput)>,
 ) {
     for (cfg, output) in &characters {
+        let mut pushed_bodies = HashSet::new();
         for touch in &output.touching_entities {
             let Some(body_entity) = runtime.shape_bodies.get(&touch.entity).copied() else {
                 continue;
             };
+            if !pushed_bodies.insert(body_entity) {
+                continue;
+            }
             let Some(body) = runtime.body(body_entity) else {
                 continue;
             };
@@ -798,12 +802,13 @@ fn apply_box3d_kcc_impulses(
                 continue;
             }
 
-            let touch_dir = -*touch.normal;
-            let body_velocity =
-                from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(touch.point)));
-            let relative_velocity = touch.character_velocity - body_velocity;
-            let touch_velocity = touch_dir.dot(relative_velocity) * touch_dir;
-            let impulse = touch_velocity * cfg.push_mass;
+            let impulse = calculate_box3d_push_impulse(
+                body,
+                cfg.push_mass,
+                touch.point,
+                -*touch.normal,
+                touch.character_velocity,
+            );
             if impulse.length_squared() <= f32::EPSILON || !impulse.is_finite() {
                 continue;
             }
@@ -811,6 +816,39 @@ fn apply_box3d_kcc_impulses(
             body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(touch.point), true);
         }
     }
+}
+
+fn calculate_box3d_push_impulse(
+    body: box3d::BodyId,
+    character_mass: f32,
+    point: Vec3,
+    direction: Vec3,
+    character_velocity: Vec3,
+) -> Vec3 {
+    if character_mass <= 0.0 || !character_mass.is_finite() {
+        return Vec3::ZERO;
+    }
+    let direction = direction.normalize_or_zero();
+    let body_velocity = from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(point)));
+    let closing_speed = direction.dot(character_velocity - body_velocity).max(0.0);
+    if closing_speed <= f32::EPSILON {
+        return Vec3::ZERO;
+    }
+
+    let lever = point - from_box3d_vec3(body.world_center_of_mass());
+    let angular_axis = lever.cross(direction);
+    let inverse_inertia = body.world_inverse_rotational_inertia();
+    let angular_response = from_box3d_vec3(inverse_inertia.cx) * angular_axis.x
+        + from_box3d_vec3(inverse_inertia.cy) * angular_axis.y
+        + from_box3d_vec3(inverse_inertia.cz) * angular_axis.z;
+    let angular_inverse_mass = direction.dot(angular_response.cross(lever)).max(0.0);
+    let inverse_effective_mass =
+        character_mass.recip() + body.inverse_mass() + angular_inverse_mass;
+    if inverse_effective_mass <= f32::EPSILON || !inverse_effective_mass.is_finite() {
+        return Vec3::ZERO;
+    }
+
+    direction * (closing_speed / inverse_effective_mass)
 }
 
 fn box3d_ground_move(
@@ -2043,6 +2081,32 @@ mod tests {
 
         assert!(transform.translation.z < -0.45, "{transform:?}");
         assert!(state.velocity.z < -0.99, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn push_impulse_uses_reduced_effective_mass() {
+        let world = box3d::World::new(box3d::Vec3::ZERO);
+        let body = world.create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::ZERO));
+        let _shape = body.create_box(
+            box3d::Vec3::new(0.4, 0.4, 0.4),
+            box3d::ShapeDef {
+                density: 1.0,
+                ..Default::default()
+            },
+        );
+        let body_id = body.id();
+
+        let impulse =
+            calculate_box3d_push_impulse(body_id, 80.0, Vec3::ZERO, Vec3::X, Vec3::X * 12.0);
+        assert!(impulse.x > 0.0 && impulse.x < 10.0, "{impulse:?}");
+
+        body_id.apply_linear_impulse(to_box3d_vec3(impulse), box3d::Vec3::ZERO, true);
+        let velocity = from_box3d_vec3(body_id.linear_velocity());
+        assert!(velocity.x > 0.0 && velocity.x <= 12.0, "{velocity:?}");
+
+        let separating =
+            calculate_box3d_push_impulse(body_id, 80.0, Vec3::ZERO, Vec3::X, Vec3::NEG_X);
+        assert_eq!(separating, Vec3::ZERO);
     }
 }
 

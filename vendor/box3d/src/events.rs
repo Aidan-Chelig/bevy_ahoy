@@ -4,7 +4,7 @@ use box3d_sys as sys;
 
 use crate::{
     handle,
-    math::{SurfaceMaterial, Transform, Vec3},
+    math::{Matrix3, SurfaceMaterial, Transform, Vec3},
     shape::{raw_shape_def, ShapeDef},
     world::World,
     Result,
@@ -128,6 +128,21 @@ impl BodyId {
     pub fn apply_linear_impulse(self, impulse: Vec3, point: Vec3, wake: bool) {
         assert!(self.is_valid());
         unsafe { sys::b3Body_ApplyLinearImpulse(self.raw, impulse.into(), point.into(), wake) };
+    }
+
+    pub fn inverse_mass(self) -> f32 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetInverseMass(self.raw) }
+    }
+
+    pub fn world_center_of_mass(self) -> Vec3 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetWorldCenterOfMass(self.raw) }.into()
+    }
+
+    pub fn world_inverse_rotational_inertia(self) -> Matrix3 {
+        assert!(self.is_valid());
+        unsafe { sys::b3Body_GetWorldInverseRotationalInertia(self.raw) }.into()
     }
 
     pub fn set_linear_damping(self, damping: f32) {
