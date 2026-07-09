@@ -153,8 +153,13 @@ pub(crate) fn sync_box3d_camera_transform(
 ) {
     for (mut camera_transform, camera) in cameras.iter_mut() {
         if let Ok((kcc_transform, cfg, state)) = kccs.get(camera.character_controller) {
+            let view_height = if state.crouching {
+                cfg.crouch_view_height
+            } else {
+                cfg.view_height
+            };
             let new_translation =
-                kcc_transform.translation + Vec3::Y * (-cfg.height / 2.0 + cfg.view_height);
+                kcc_transform.translation + Vec3::Y * (-cfg.height / 2.0 + view_height);
             sync_camera_translation(
                 &mut camera_transform,
                 camera,

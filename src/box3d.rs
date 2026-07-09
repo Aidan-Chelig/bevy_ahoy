@@ -217,8 +217,11 @@ pub struct AhoyBox3dShape {
 )]
 pub struct Box3dCharacterController {
     pub height: f32,
+    pub crouch_height: f32,
     pub radius: f32,
     pub view_height: f32,
+    pub crouch_view_height: f32,
+    pub crouch_speed_scale: f32,
     pub ground_distance: f32,
     pub min_walk_cos: f32,
     pub stop_speed: f32,
@@ -244,8 +247,11 @@ impl Default for Box3dCharacterController {
     fn default() -> Self {
         Self {
             height: 1.8,
+            crouch_height: 1.3,
             radius: 0.7,
             view_height: 1.7,
+            crouch_view_height: 1.2,
+            crouch_speed_scale: 1.0 / 3.0,
             ground_distance: 0.05,
             min_walk_cos: 40.0_f32.to_radians().cos(),
             stop_speed: 2.54,
@@ -276,6 +282,7 @@ pub struct Box3dCharacterControllerState {
     pub platform_velocity: Vec3,
     pub platform_angular_velocity: Vec3,
     pub grounded: Option<Box3dCastHit>,
+    pub crouching: bool,
     pub last_ground: Stopwatch,
     pub last_step_up: Stopwatch,
     pub last_step_down: Stopwatch,
@@ -290,6 +297,7 @@ impl Default for Box3dCharacterControllerState {
             platform_velocity: Vec3::ZERO,
             platform_angular_velocity: Vec3::ZERO,
             grounded: None,
+            crouching: false,
             last_ground,
             last_step_up: max_stopwatch(),
             last_step_down: max_stopwatch(),
@@ -564,8 +572,9 @@ fn run_box3d_kcc(
         state.last_ground.tick(time.delta());
         state.last_step_up.tick(time.delta());
         state.last_step_down.tick(time.delta());
-        depenetrate_box3d_character(&runtime, cfg, &mut transform);
+        depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
+        handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
 
         if state.grounded.is_none() {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
@@ -573,7 +582,7 @@ fn run_box3d_kcc(
 
         handle_box3d_jump(cfg, &mut state, &mut input);
 
-        let wish_velocity = box3d_wish_velocity(cfg, &input, look);
+        let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
         if state.grounded.is_some() {
             apply_box3d_friction(&runtime, cfg, &mut state, delta);
             box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
@@ -681,10 +690,10 @@ fn box3d_ground_move(
         return;
     }
 
-    if cast_box3d_character(runtime, cfg, transform.translation, movement).is_none() {
+    if cast_box3d_character(runtime, cfg, state, transform.translation, movement).is_none() {
         transform.translation += movement;
         state.velocity -= state.platform_velocity;
-        depenetrate_box3d_character(runtime, cfg, transform);
+        depenetrate_box3d_character(runtime, cfg, state, transform);
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
@@ -717,6 +726,7 @@ fn handle_box3d_jump(
 
 fn box3d_wish_velocity(
     cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
     input: &AccumulatedInput,
     look: &CharacterLook,
 ) -> Vec3 {
@@ -729,7 +739,12 @@ fn box3d_wish_velocity(
     right = right.normalize_or_zero();
 
     let wish_velocity = movement.y * forward + movement.x * right;
-    wish_velocity.normalize_or_zero() * cfg.speed
+    let speed = if state.crouching {
+        cfg.speed * cfg.crouch_speed_scale
+    } else {
+        cfg.speed
+    };
+    wish_velocity.normalize_or_zero() * speed
 }
 
 fn box3d_ground_accelerate(
@@ -809,7 +824,8 @@ fn box3d_move_and_slide(
             break;
         }
 
-        let Some(hit) = cast_box3d_character(runtime, cfg, transform.translation, remaining) else {
+        let Some(hit) = cast_box3d_character(runtime, cfg, state, transform.translation, remaining)
+        else {
             transform.translation += remaining;
             break;
         };
@@ -853,13 +869,13 @@ fn box3d_step_move(
     output.touching_entities = original_touching_entities;
 
     let up = Vec3::Y * cfg.step_size;
-    let up_distance = cast_box3d_character(runtime, cfg, transform.translation, up)
+    let up_distance = cast_box3d_character(runtime, cfg, state, transform.translation, up)
         .map(|hit| hit.distance)
         .unwrap_or(cfg.step_size);
     transform.translation.y += up_distance;
 
     let forward_probe = state.velocity.normalize_or_zero() * cfg.min_step_ledge_space;
-    if cast_box3d_character(runtime, cfg, transform.translation, forward_probe).is_some() {
+    if cast_box3d_character(runtime, cfg, state, transform.translation, forward_probe).is_some() {
         transform.translation = down_position;
         state.velocity = down_velocity;
         output.touching_entities = down_touching_entities;
@@ -869,7 +885,8 @@ fn box3d_step_move(
     box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
 
     let down = Vec3::NEG_Y * cfg.step_size;
-    let Some(down_hit) = cast_box3d_character(runtime, cfg, transform.translation, down) else {
+    let Some(down_hit) = cast_box3d_character(runtime, cfg, state, transform.translation, down)
+    else {
         transform.translation = down_position;
         state.velocity = down_velocity;
         output.touching_entities = down_touching_entities;
@@ -883,7 +900,7 @@ fn box3d_step_move(
     }
 
     transform.translation.y -= down_hit.distance;
-    depenetrate_box3d_character(runtime, cfg, transform);
+    depenetrate_box3d_character(runtime, cfg, state, transform);
     let up_position = transform.translation;
     let down_dist = down_position.xz().distance_squared(original_position.xz());
     let up_dist = up_position.xz().distance_squared(original_position.xz());
@@ -928,7 +945,7 @@ fn snap_box3d_to_ground(
     transform: &mut Transform,
 ) {
     let up = Vec3::Y * cfg.ground_distance;
-    let up_distance = cast_box3d_character(runtime, cfg, transform.translation, up)
+    let up_distance = cast_box3d_character(runtime, cfg, state, transform.translation, up)
         .map(|hit| hit.distance)
         .unwrap_or(cfg.ground_distance);
 
@@ -936,7 +953,8 @@ fn snap_box3d_to_ground(
     let start = transform.translation + Vec3::Y * up_distance;
     let down_distance = up_distance + cfg.step_size;
 
-    let Some(hit) = cast_box3d_character(runtime, cfg, start, Vec3::NEG_Y * down_distance) else {
+    let Some(hit) = cast_box3d_character(runtime, cfg, state, start, Vec3::NEG_Y * down_distance)
+    else {
         return;
     };
     if hit.normal.y < cfg.min_walk_cos || hit.distance <= cfg.ground_distance {
@@ -947,7 +965,7 @@ fn snap_box3d_to_ground(
     if original_position.y - transform.translation.y > cfg.step_down_detection_distance {
         state.last_step_down.reset();
     }
-    depenetrate_box3d_character(runtime, cfg, transform);
+    depenetrate_box3d_character(runtime, cfg, state, transform);
 }
 
 fn update_box3d_grounded(
@@ -965,6 +983,7 @@ fn update_box3d_grounded(
     let hit = cast_box3d_character(
         runtime,
         cfg,
+        state,
         transform.translation,
         Vec3::NEG_Y * cast_distance,
     );
@@ -1003,12 +1022,50 @@ fn update_box3d_platform_velocity(
     state.platform_angular_velocity = from_box3d_vec3(body.angular_velocity());
 }
 
+fn handle_box3d_crouching(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &AccumulatedInput,
+    transform: &Transform,
+) {
+    if input.crouched {
+        state.crouching = true;
+    } else if state.crouching
+        && !box3d_character_intersects(runtime, cfg, transform.translation, false)
+    {
+        state.crouching = false;
+    }
+}
+
+fn box3d_character_intersects(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    origin: Vec3,
+    crouching: bool,
+) -> bool {
+    let points = box3d_character_points(cfg, crouching);
+    let mut intersects = false;
+    runtime.world.collide_mover(
+        to_box3d_vec3(origin),
+        points,
+        cfg.radius,
+        box3d::QueryFilter::default(),
+        |_, _| {
+            intersects = true;
+            false
+        },
+    );
+    intersects
+}
+
 fn depenetrate_box3d_character(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
     transform: &mut Transform,
 ) {
-    let points = box3d_character_points(cfg);
+    let points = box3d_character_points(cfg, state.crouching);
     let mut planes = Vec::new();
     runtime.world.collide_mover(
         to_box3d_vec3(transform.translation),
@@ -1031,6 +1088,7 @@ fn depenetrate_box3d_character(
 fn cast_box3d_character(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
     origin: Vec3,
     movement: Vec3,
 ) -> Option<Box3dCastHit> {
@@ -1039,7 +1097,7 @@ fn cast_box3d_character(
         return None;
     }
 
-    let points = box3d_character_points(cfg);
+    let points = box3d_character_points(cfg, state.crouching);
     let proxy = box3d::ShapeProxy::new(&points, cfg.radius).ok()?;
     let mut closest: Option<Box3dCastHit> = None;
     runtime.world.cast_shape(
@@ -1064,11 +1122,18 @@ fn cast_box3d_character(
     closest
 }
 
-fn box3d_character_points(cfg: &Box3dCharacterController) -> [box3d::Vec3; 2] {
-    let half_segment = (cfg.height * 0.5 - cfg.radius).max(0.0);
+fn box3d_character_points(cfg: &Box3dCharacterController, crouching: bool) -> [box3d::Vec3; 2] {
+    let height = if crouching {
+        cfg.crouch_height
+    } else {
+        cfg.height
+    }
+    .max(cfg.radius * 2.0);
+    let center_offset = (height - cfg.height) * 0.5;
+    let half_segment = (height * 0.5 - cfg.radius).max(0.0);
     [
-        box3d::Vec3::new(0.0, -half_segment, 0.0),
-        box3d::Vec3::new(0.0, half_segment, 0.0),
+        box3d::Vec3::new(0.0, center_offset - half_segment, 0.0),
+        box3d::Vec3::new(0.0, center_offset + half_segment, 0.0),
     ]
 }
 
@@ -1082,6 +1147,61 @@ fn validate_box3d_velocity(
         }
     }
     state.velocity = state.velocity.clamp_length_max(cfg.max_speed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crouching_keeps_capsule_feet_fixed() {
+        let cfg = Box3dCharacterController::default();
+        let standing = box3d_character_points(&cfg, false);
+        let crouching = box3d_character_points(&cfg, true);
+
+        let standing_foot = standing[0].y - cfg.radius;
+        let crouching_foot = crouching[0].y - cfg.radius;
+        assert_eq!(standing_foot, crouching_foot);
+        assert!(crouching[1].y < standing[1].y);
+    }
+
+    #[test]
+    fn crouch_height_cannot_make_capsule_shorter_than_its_diameter() {
+        let cfg = Box3dCharacterController {
+            crouch_height: 0.1,
+            ..Default::default()
+        };
+        let crouching = box3d_character_points(&cfg, true);
+
+        assert_eq!(crouching[0], crouching[1]);
+        assert_eq!(crouching[0].y - cfg.radius, -cfg.height * 0.5);
+    }
+
+    #[test]
+    fn standing_overlap_ignores_floor_contact_but_detects_low_ceiling() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let origin = Vec3::Y * cfg.height * 0.5;
+
+        assert!(!box3d_character_intersects(&runtime, &cfg, origin, false));
+
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.75, 0.0)));
+        let _ceiling_shape =
+            ceiling.create_box(box3d::Vec3::new(2.0, 0.25, 2.0), box3d::ShapeDef::default());
+
+        assert!(box3d_character_intersects(&runtime, &cfg, origin, false));
+        assert!(!box3d_character_intersects(&runtime, &cfg, origin, true));
+    }
 }
 
 fn to_box3d_vec3(value: Vec3) -> box3d::Vec3 {

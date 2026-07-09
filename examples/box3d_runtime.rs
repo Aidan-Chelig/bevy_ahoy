@@ -7,7 +7,7 @@ use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
     camera::AhoyCameraPlugin,
-    input::{Jump, Movement, RotateCamera},
+    input::{Crouch, Jump, Movement, RotateCamera},
     prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
@@ -97,6 +97,14 @@ fn setup(
         Color::srgb(0.45, 0.72, 0.82),
         0.05,
     );
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Vec3::new(4.0, 0.3, 3.0),
+        Transform::from_xyz(-2.0, 1.75, -7.0),
+        Color::srgb(0.38, 0.4, 0.45),
+    );
     for i in 0..4 {
         spawn_dynamic_box(
             &mut commands,
@@ -134,6 +142,10 @@ fn setup(
                 (
                     Action::<Jump>::new(),
                     bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<Crouch>::new(),
+                    bindings![KeyCode::ControlLeft, GamepadButton::LeftTrigger2],
                 ),
                 (
                     Action::<RotateCamera>::new(),
