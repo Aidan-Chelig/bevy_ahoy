@@ -272,6 +272,11 @@ pub struct Box3dCharacterController {
     pub climb_pull_up_height: f32,
     pub ledge_jump_power: f32,
     pub ledge_jump_factor: f32,
+    pub crane_input_buffer: Duration,
+    pub crane_height: f32,
+    pub crane_speed: f32,
+    pub min_crane_cos: f32,
+    pub min_crane_ledge_space: f32,
     pub coyote_time: Duration,
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
@@ -319,6 +324,11 @@ impl Default for Box3dCharacterController {
             climb_pull_up_height: 0.3,
             ledge_jump_power: 1.5,
             ledge_jump_factor: 0.8,
+            crane_input_buffer: Duration::from_millis(200),
+            crane_height: 1.5,
+            crane_speed: 11.0,
+            min_crane_cos: 50.0_f32.to_radians().cos(),
+            min_crane_ledge_space: 0.35,
             coyote_time: Duration::from_millis(100),
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
@@ -373,6 +383,8 @@ pub struct Box3dMantleState {
     pub ledge_position: Vec3,
     pub wall_entity: Entity,
     pub target_position: Vec3,
+    pub speed: f32,
+    pub automatic: bool,
 }
 
 /// Hit data produced by Box3D character casts.
@@ -654,6 +666,14 @@ fn run_box3d_kcc(
             state.grounded = None;
         }
         let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
+        update_box3d_crane_state(
+            &runtime,
+            cfg,
+            &mut state,
+            &mut input,
+            &transform,
+            wish_velocity,
+        );
         update_box3d_mantle_state(
             &runtime,
             cfg,
@@ -825,6 +845,46 @@ fn box3d_ground_move(
     snap_box3d_to_ground(runtime, cfg, state, transform);
 }
 
+fn update_box3d_crane_state(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    transform: &Transform,
+    wish_velocity: Vec3,
+) {
+    if state.mantle.is_some() {
+        return;
+    }
+    let Some(crane_time) = input.craned.clone() else {
+        return;
+    };
+    if crane_time.elapsed() > cfg.crane_input_buffer {
+        return;
+    }
+
+    let saved_mantle_input = input.mantled.take();
+    input.mantled = Some(crane_time);
+    let mut crane_cfg = *cfg;
+    crane_cfg.mantle_input_buffer = cfg.crane_input_buffer;
+    crane_cfg.mantle_height = cfg.crane_height;
+    crane_cfg.mantle_speed = cfg.crane_speed;
+    crane_cfg.min_mantle_cos = cfg.min_crane_cos;
+    crane_cfg.min_mantle_ledge_space = cfg.min_crane_ledge_space;
+    update_box3d_mantle_state(runtime, &crane_cfg, state, input, transform, wish_velocity);
+
+    if let Some(mantle) = state.mantle.as_mut() {
+        mantle.speed = cfg.crane_speed;
+        mantle.automatic = true;
+        input.craned = None;
+        input.mantled = None;
+        input.jumped = None;
+        input.tac = None;
+    } else {
+        input.mantled = saved_mantle_input;
+    }
+}
+
 fn update_box3d_mantle_state(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
@@ -903,6 +963,8 @@ fn update_box3d_mantle_state(
         ledge_position: ledge_hit.point,
         wall_entity,
         target_position,
+        speed: cfg.mantle_speed,
+        automatic: false,
     });
     input.craned = None;
     input.mantled = None;
@@ -928,7 +990,7 @@ fn handle_box3d_mantle_movement(
     });
     state.velocity = Vec3::ZERO;
 
-    if input.last_movement.unwrap_or_default().y <= 0.0 {
+    if !mantle.automatic && input.last_movement.unwrap_or_default().y <= 0.0 {
         return;
     }
     let to_target = mantle.target_position - transform.translation;
@@ -945,7 +1007,7 @@ fn handle_box3d_mantle_movement(
     } else {
         to_target
     };
-    let movement = desired.clamp_length_max(cfg.mantle_speed * delta);
+    let movement = desired.clamp_length_max(mantle.speed * delta);
     let travel = cast_box3d_character(runtime, cfg, state, transform.translation, movement)
         .map(|hit| movement.normalize_or_zero() * hit.distance)
         .unwrap_or(movement);
@@ -1836,6 +1898,29 @@ mod tests {
         assert_eq!(mantle.wall_entity, ledge_entity);
         assert!(mantle.target_position.y > cfg.height * 0.5);
         assert!(input.mantled.is_none());
+
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            craned: Some(Stopwatch::new()),
+            mantled: Some(Stopwatch::new()),
+            jumped: Some(Stopwatch::new()),
+            ..Default::default()
+        };
+        update_box3d_crane_state(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::NEG_Z * cfg.speed,
+        );
+
+        let crane = state.mantle.unwrap();
+        assert!(crane.automatic);
+        assert_eq!(crane.speed, cfg.crane_speed);
+        assert!(input.craned.is_none());
+        assert!(input.mantled.is_none());
+        assert!(input.jumped.is_none());
     }
 
     #[test]
@@ -1847,6 +1932,8 @@ mod tests {
                 ledge_position: Vec3::ZERO,
                 wall_entity: Entity::from_bits(42),
                 target_position: Vec3::Y,
+                speed: cfg.mantle_speed,
+                automatic: false,
             }),
             ..Default::default()
         };
