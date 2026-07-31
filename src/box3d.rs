@@ -255,9 +255,11 @@ pub struct Box3dCharacterController {
     pub water_gravity: f32,
     pub gravity: f32,
     pub speed: f32,
+    pub air_speed: f32,
     pub max_speed: f32,
     pub max_air_wish_speed: f32,
     pub jump_height: f32,
+    pub air_friction: f32,
     pub tac_power: f32,
     pub tac_jump_factor: f32,
     pub tac_input_buffer: Duration,
@@ -278,6 +280,8 @@ pub struct Box3dCharacterController {
     pub crane_speed: f32,
     pub min_crane_cos: f32,
     pub min_crane_ledge_space: f32,
+    pub jump_crane_chain_time: Duration,
+    pub unground_speed: f32,
     pub coyote_time: Duration,
     pub jump_input_buffer: Duration,
     pub skin_width: f32,
@@ -308,9 +312,11 @@ impl Default for Box3dCharacterController {
             water_gravity: 2.4,
             gravity: 29.0,
             speed: 12.0,
+            air_speed: 1.5,
             max_speed: 100.0,
             max_air_wish_speed: 0.76,
             jump_height: 1.8,
+            air_friction: 0.0,
             tac_power: 0.755,
             tac_jump_factor: 1.0,
             tac_input_buffer: Duration::from_millis(150),
@@ -331,6 +337,8 @@ impl Default for Box3dCharacterController {
             crane_speed: 11.0,
             min_crane_cos: 50.0_f32.to_radians().cos(),
             min_crane_ledge_space: 0.35,
+            jump_crane_chain_time: Duration::from_millis(140),
+            unground_speed: 10.0,
             coyote_time: Duration::from_millis(100),
             jump_input_buffer: Duration::from_millis(150),
             skin_width: 0.015,
@@ -352,6 +360,7 @@ pub struct Box3dCharacterControllerState {
     pub grounded: Option<Box3dCastHit>,
     pub crouching: bool,
     pub tac_velocity: f32,
+    pub crane_height_left: Option<f32>,
     pub mantle: Option<Box3dMantleState>,
     pub last_ground: Stopwatch,
     pub last_tac: Stopwatch,
@@ -370,6 +379,7 @@ impl Default for Box3dCharacterControllerState {
             grounded: None,
             crouching: false,
             tac_velocity: 0.0,
+            crane_height_left: None,
             mantle: None,
             last_ground,
             last_tac: max_stopwatch(),
@@ -676,14 +686,18 @@ fn run_box3d_kcc(
             &transform,
             wish_velocity,
         );
-        update_box3d_mantle_state(
-            &runtime,
-            cfg,
-            &mut state,
-            &mut input,
-            &transform,
-            wish_velocity,
-        );
+        if state.crane_height_left.is_some() {
+            state.mantle = None;
+        } else {
+            update_box3d_mantle_state(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut input,
+                &transform,
+                wish_velocity,
+            );
+        }
         update_box3d_climbdown_state(
             &runtime,
             cfg,
@@ -693,7 +707,19 @@ fn run_box3d_kcc(
             wish_velocity,
         );
         handle_box3d_ledge_jump(cfg, &mut state, &mut input, look);
-        if state.mantle.is_some() {
+        if state.crane_height_left.is_some() {
+            handle_box3d_crane_movement(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                wish_velocity,
+                delta,
+            );
+            validate_box3d_velocity(cfg, &mut state);
+            continue;
+        } else if state.mantle.is_some() {
             handle_box3d_mantle_movement(
                 &runtime,
                 cfg,
@@ -728,6 +754,7 @@ fn run_box3d_kcc(
             box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
             state.velocity.y = state.velocity.y.min(0.0);
         } else {
+            apply_box3d_air_friction(cfg, &mut state, delta);
             box3d_air_accelerate(cfg, &mut state, wish_velocity, delta);
         }
 
@@ -904,6 +931,10 @@ fn update_box3d_crane_state(
     if state.mantle.is_some() {
         return;
     }
+    if state.crane_height_left.is_some() {
+        state.mantle = None;
+        return;
+    }
     let Some(crane_time) = input.craned.clone() else {
         return;
     };
@@ -911,26 +942,168 @@ fn update_box3d_crane_state(
         return;
     }
 
-    let saved_mantle_input = input.mantled.take();
-    input.mantled = Some(crane_time);
-    let mut crane_cfg = *cfg;
-    crane_cfg.mantle_input_buffer = cfg.crane_input_buffer;
-    crane_cfg.mantle_height = cfg.crane_height;
-    crane_cfg.mantle_speed = cfg.crane_speed;
-    crane_cfg.min_mantle_cos = cfg.min_crane_cos;
-    crane_cfg.min_mantle_ledge_space = cfg.min_crane_ledge_space;
-    update_box3d_mantle_state(runtime, &crane_cfg, state, input, transform, wish_velocity);
+    let Some(crane_height) =
+        available_box3d_crane_height(runtime, cfg, state, transform, wish_velocity)
+    else {
+        state.crane_height_left = None;
+        return;
+    };
 
-    if let Some(mantle) = state.mantle.as_mut() {
-        mantle.speed = cfg.crane_speed;
-        mantle.automatic = true;
-        input.craned = None;
-        input.mantled = None;
-        input.jumped = None;
-        input.tac = None;
-    } else {
-        input.mantled = saved_mantle_input;
+    input.craned = None;
+    input.jumped = None;
+    input.mantled = None;
+    input.tac = None;
+    state.mantle = None;
+    state.grounded = None;
+    state.crane_height_left = Some(crane_height);
+}
+
+fn available_box3d_crane_height(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    transform: &Transform,
+    wish_velocity: Vec3,
+) -> Option<f32> {
+    let wish_dir = Dir3::new(wish_velocity)
+        .or_else(|_| Dir3::new(Vec3::new(state.velocity.x, 0.0, state.velocity.z)))
+        .ok()?;
+    let wall_hit = cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        *wish_dir * cfg.min_crane_ledge_space,
+    )?;
+    let wall_normal = Vec3::new(wall_hit.normal.x, 0.0, wall_hit.normal.z).normalize_or_zero();
+    if (-wall_normal).dot(*wish_dir) < cfg.min_crane_cos {
+        return None;
     }
+
+    let up_hit = cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        Vec3::Y * cfg.crane_height,
+    );
+    let up_dist = up_hit.map(|hit| hit.distance).unwrap_or(cfg.crane_height);
+    let probe_origin =
+        transform.translation + Vec3::Y * up_dist - wall_normal * cfg.min_crane_ledge_space;
+    let down_hit = cast_box3d_character(runtime, cfg, state, probe_origin, Vec3::NEG_Y * up_dist)?;
+    if down_hit.normal.y < cfg.min_walk_cos {
+        return None;
+    }
+    let crane_height = up_dist - down_hit.distance;
+    if crane_height <= cfg.step_size || crane_height > cfg.crane_height {
+        return None;
+    }
+
+    let landing_position =
+        probe_origin + Vec3::NEG_Y * down_hit.distance + Vec3::Y * cfg.skin_width;
+    if box3d_character_intersects(runtime, cfg, landing_position, state.crouching) {
+        return None;
+    }
+    Some(crane_height)
+}
+
+fn handle_box3d_crane_movement(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
+    transform: &mut Transform,
+    wish_velocity: Vec3,
+    delta: f32,
+) {
+    let Some(crane_height) = state.crane_height_left else {
+        return;
+    };
+    state.velocity.y = 0.0;
+    box3d_ground_accelerate(cfg, state, wish_velocity, delta);
+    state.velocity.y = 0.0;
+    state.velocity += state.platform_velocity;
+
+    let Ok((vel_dir, speed)) = Dir3::new_and_length(state.velocity) else {
+        state.crane_height_left = None;
+        state.velocity -= state.platform_velocity;
+        return;
+    };
+    let wish_dir = Dir3::new(wish_velocity).unwrap_or(vel_dir);
+    state.velocity -= state.platform_velocity;
+
+    let Some(wall_hit) = cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        *wish_dir * cfg.min_crane_ledge_space,
+    ) else {
+        state.crane_height_left = None;
+        return;
+    };
+    let wall_normal = Vec3::new(wall_hit.normal.x, 0.0, wall_hit.normal.z).normalize_or_zero();
+    if (-wall_normal).dot(*wish_dir) < cfg.min_crane_cos {
+        state.crane_height_left = None;
+        return;
+    }
+
+    let vertical = Vec3::Y * (cfg.crane_speed * delta).min(crane_height);
+    let top_hit = cast_box3d_character(runtime, cfg, state, transform.translation, vertical);
+    let travel_dist = top_hit.map(|hit| hit.distance).unwrap_or(vertical.y);
+    transform.translation.y += travel_dist;
+
+    let saved_velocity = state.velocity;
+    state.velocity = state.platform_velocity;
+    box3d_move_and_slide(
+        runtime,
+        cfg,
+        state,
+        output,
+        transform,
+        state.velocity * delta,
+    );
+    state.velocity = saved_velocity;
+
+    state.crane_height_left = if top_hit.is_some() {
+        Some(0.0)
+    } else {
+        Some((crane_height - travel_dist).max(0.0))
+    };
+    state.last_step_up.reset();
+
+    if state.crane_height_left != Some(0.0) {
+        if cast_box3d_character(
+            runtime,
+            cfg,
+            state,
+            transform.translation,
+            *vel_dir * cfg.min_crane_ledge_space,
+        )
+        .is_none()
+        {
+            transform.translation += *vel_dir * speed * delta;
+            depenetrate_box3d_character(runtime, cfg, state, transform);
+            state.crane_height_left = None;
+        }
+        return;
+    }
+
+    if cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        *vel_dir * cfg.min_crane_ledge_space,
+    )
+    .is_some()
+    {
+        state.crane_height_left = None;
+        return;
+    }
+    transform.translation += *vel_dir * speed * delta;
+    depenetrate_box3d_character(runtime, cfg, state, transform);
+    state.crane_height_left = None;
 }
 
 fn update_box3d_mantle_state(
@@ -1185,6 +1358,9 @@ fn handle_box3d_jump(
     state.last_tac.reset();
     state.velocity += jump_direction * (2.0 * cfg.gravity * cfg.jump_height).sqrt()
         + Vec3::Y * state.platform_velocity.y;
+    if let Some(crane_input) = input.craned.as_mut() {
+        crane_input.tick((cfg.crane_input_buffer - cfg.jump_crane_chain_time).max(Duration::ZERO));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1267,7 +1443,9 @@ fn box3d_wish_velocity(
     right = right.normalize_or_zero();
 
     let wish_velocity = movement.y * forward + movement.x * right;
-    let speed = if state.crouching {
+    let speed = if state.grounded.is_none() {
+        cfg.air_speed
+    } else if state.crouching {
         cfg.speed * cfg.crouch_speed_scale
     } else {
         cfg.speed
@@ -1405,6 +1583,25 @@ fn apply_box3d_friction(
     if new_speed != speed {
         state.velocity.x *= new_speed / speed;
         state.velocity.z *= new_speed / speed;
+    }
+}
+
+fn apply_box3d_air_friction(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    delta: f32,
+) {
+    if cfg.air_friction <= 0.0 {
+        return;
+    }
+    let speed = state.velocity.length();
+    if speed < 0.001 {
+        return;
+    }
+    let control = speed.max(cfg.stop_speed);
+    let new_speed = (speed - control * cfg.friction_hz * cfg.air_friction * delta).max(0.0);
+    if new_speed != speed {
+        state.velocity *= new_speed / speed;
     }
 }
 
@@ -1677,6 +1874,15 @@ fn update_box3d_grounded(
     transform: &Transform,
     delta: f32,
 ) {
+    let mut moving_up_rapidly = state.velocity.y > cfg.unground_speed;
+    if moving_up_rapidly && state.grounded.is_some() {
+        moving_up_rapidly = (state.velocity.y - state.platform_velocity.y) > cfg.unground_speed;
+    }
+    if moving_up_rapidly {
+        state.grounded = None;
+        return;
+    }
+
     let cast_distance = if state.platform_velocity.y < 0.0 {
         cfg.ground_distance - state.platform_velocity.y * delta
     } else {
@@ -2109,6 +2315,71 @@ mod tests {
     }
 
     #[test]
+    fn airborne_wish_velocity_uses_air_speed() {
+        let cfg = Box3dCharacterController::default();
+        let state = Box3dCharacterControllerState::default();
+        let input = AccumulatedInput {
+            last_movement: Some(bevy_math::Vec2::Y),
+            ..Default::default()
+        };
+
+        let wish_velocity = box3d_wish_velocity(&cfg, &state, &input, &CharacterLook::default());
+
+        assert!((wish_velocity.length() - cfg.air_speed).abs() < 0.0001);
+    }
+
+    #[test]
+    fn air_friction_damps_airborne_velocity() {
+        let cfg = Box3dCharacterController {
+            air_friction: 1.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::X * cfg.speed,
+            ..Default::default()
+        };
+
+        apply_box3d_air_friction(&cfg, &mut state, 1.0 / 60.0);
+
+        assert!(state.velocity.x < cfg.speed, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn upward_speed_can_unground_character() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::Y * (cfg.unground_speed + 1.0),
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+
+        update_box3d_grounded(
+            &runtime,
+            &cfg,
+            &mut state,
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            1.0 / 60.0,
+        );
+
+        assert!(state.grounded.is_none());
+    }
+
+    #[test]
     fn mantle_probe_finds_clear_ledge() {
         let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
             gravity: Vec3::ZERO,
@@ -2162,9 +2433,8 @@ mod tests {
             Vec3::NEG_Z * cfg.speed,
         );
 
-        let crane = state.mantle.unwrap();
-        assert!(crane.automatic);
-        assert_eq!(crane.speed, cfg.crane_speed);
+        assert!(state.mantle.is_none());
+        assert!(state.crane_height_left.is_some());
         assert!(input.craned.is_none());
         assert!(input.mantled.is_none());
         assert!(input.jumped.is_none());
