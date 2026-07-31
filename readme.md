@@ -5,6 +5,17 @@
 
 A fun 3D Kinematic Character Controller for [Bevy](https://github.com/bevyengine/bevy) + [Avian](https://github.com/avianphysics/avian) + [BEI](https://github.com/simgine/bevy_enhanced_input).
 
+> **Fork note**
+>
+> This repository is a fork of `bevy_ahoy` with an experimental Box3D backend.
+> The original crate is still Avian-first. This fork keeps that path, but also
+> adds a Bevy 0.18-compatible Box3D runtime and a Source-style Box3D character
+> controller for projects that want to experiment with [`box3d`](https://crates.io/crates/box3d).
+>
+> The Box3D work is intentionally fork-shaped rather than a small upstream patch:
+> it adds a second physics backend, native pickup glue, Box3D collider components,
+> and backend-specific examples. Treat the Box3D API as experimental.
+
 <https://github.com/user-attachments/assets/ad1648d9-8a3d-43a6-9e20-886d6bb2eaad>
 
 *Surf gameplay by Boonie, who kindly converted the Utopia surf map to a compatible format. See assets/maps/license.md for licensing information*
@@ -106,39 +117,117 @@ fn spawn_player(mut commands: Commands) {
 
 ### Box3D feature
 
-Enable the optional `box3d` feature to depend on and re-export [`box3d`](https://crates.io/crates/box3d)
-and [`bevy_box3d`](https://crates.io/crates/bevy_box3d):
+This fork includes an optional `box3d` feature. It depends on and re-exports
+[`box3d`](https://crates.io/crates/box3d) and [`bevy_box3d`](https://crates.io/crates/bevy_box3d),
+and provides `AhoyBox3dPlugin`, a lightweight Bevy 0.18-compatible Box3D runtime.
 
 ```toml
-bevy_ahoy = { version = "0.1", features = ["box3d"] }
+bevy_ahoy = { git = "https://github.com/YOUR_GITHUB_USER/bevy_ahoy", branch = "box3d", default-features = false, features = ["box3d"] }
 ```
 
-Ahoy's character controller currently still uses Avian for movement. `bevy_box3d`
-0.3 targets Bevy 0.19, while this crate currently targets Bevy 0.18, so Box3D
-support includes a lightweight `AhoyBox3dPlugin` runtime for Bevy 0.18 and
-re-exports `bevy_box3d` for projects that can use its Bevy 0.19 integration.
+Replace `YOUR_GITHUB_USER` and `branch` with the fork/branch you are using. If
+you are developing from a local checkout, use a path dependency instead:
+
+```toml
+bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["box3d"] }
+```
+
+The Box3D backend does not use `PhysicsPlugins`. Instead, add the usual Bevy and
+input plugins plus Ahoy's Box3D runtime/input/camera plugins:
 
 ```rust
 use bevy::prelude::*;
-use bevy_ahoy::box3d::prelude::*;
+use bevy_enhanced_input::prelude::*;
+use bevy_ahoy::{
+    AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
+    box3d::prelude::*,
+    camera::AhoyCameraPlugin,
+    input::{Crouch, Jump, Movement, RotateCamera},
+    prelude::CharacterControllerCameraOf,
+};
 
-App::new()
-    .add_plugins((DefaultPlugins, AhoyBox3dPlugin::default()))
-    .add_systems(Startup, |mut commands: Commands| {
+fn main() {
+    App::new()
+        .add_plugins((
+            DefaultPlugins,
+            EnhancedInputPlugin,
+            AhoyFixedUpdateUtilsPlugin,
+            AhoyInputPlugin,
+            AhoyCameraPlugin,
+            AhoyBox3dPlugin::default(),
+        ))
+        .add_input_context::<PlayerInput>()
+        .add_systems(Startup, setup)
+        .run();
+}
+
+#[derive(Component)]
+struct PlayerInput;
+
+fn setup(mut commands: Commands) {
+    commands.spawn((
+        AhoyBox3dBody::STATIC,
+        AhoyBox3dCollider::cuboid_from_size(Vec3::new(16.0, 1.0, 16.0)),
+        Transform::from_xyz(0.0, -0.5, 0.0),
+    ));
+
+    let player = commands
+        .spawn((
+            Transform::from_xyz(0.0, 2.0, 6.0),
+            Box3dCharacterController::default(),
+            PlayerInput,
+            actions!(PlayerInput[
+                (
+                    Action::<Movement>::new(),
+                    DeadZone::default(),
+                    Bindings::spawn((Cardinal::wasd_keys(), Axial::left_stick()))
+                ),
+                (
+                    Action::<Jump>::new(),
+                    bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<Crouch>::new(),
+                    bindings![KeyCode::ControlLeft, GamepadButton::LeftTrigger2],
+                ),
+                (
+                    Action::<RotateCamera>::new(),
+                    Bindings::spawn((
+                        Spawn((Binding::mouse_motion(), Scale::splat(0.07))),
+                        Axial::right_stick().with((Scale::splat(4.0), DeadZone::default())),
+                    ))
+                ),
+            ]),
+        ))
+        .id();
+
+    commands.spawn((
+        Camera3d::default(),
+        CharacterControllerCameraOf::new(player),
+    ));
+
+    for x in [-2.0, 0.0, 2.0] {
         commands.spawn((
             AhoyBox3dBody::DYNAMIC,
-            AhoyBox3dCollider::sphere(0.5),
+            AhoyBox3dCollider::cuboid_from_size(Vec3::splat(0.8)),
             AhoyBox3dVelocity::default(),
-            Transform::from_xyz(0.0, 4.0, 0.0),
+            Transform::from_xyz(x, 3.0, 0.0),
         ));
-
-        commands.spawn((
-            AhoyBox3dBody::STATIC,
-            AhoyBox3dCollider::cuboid(Vec3::new(8.0, 0.5, 8.0)),
-            Transform::from_xyz(0.0, -0.5, 0.0),
-        ));
-    });
+    }
+}
 ```
+
+For a complete runnable scene with moving platforms, water, mantle/crane/tic-tac
+inputs, dynamic props, and Box3D pickup, run:
+
+```sh
+nix develop --command cargo run --example box3d_runtime --no-default-features --features box3d
+```
+
+The Box3D backend is not a strict drop-in replacement for the Avian backend.
+Core movement tuning is intentionally kept close to the Avian controller, but
+colliders are explicit `AhoyBox3dCollider` components and pickup uses
+`Box3dPickupActor` instead of `avian_pickup`.
 
 ## Inspiration
 
