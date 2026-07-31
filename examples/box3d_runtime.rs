@@ -7,7 +7,7 @@ use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
     camera::AhoyCameraPlugin,
-    input::{Crane, Crouch, Jump, Mantle, Movement, RotateCamera, SwimUp, Tac},
+    input::{Climbdown, Crane, Crouch, Jump, Mantle, Movement, RotateCamera, SwimUp, Tac},
     prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
@@ -179,6 +179,10 @@ fn setup(
                 (
                     Action::<SwimUp>::new(),
                     bindings![KeyCode::Space, GamepadButton::South],
+                ),
+                (
+                    Action::<Climbdown>::new(),
+                    bindings![KeyCode::ControlLeft, GamepadButton::LeftTrigger2],
                 ),
                 (
                     Action::<Crouch>::new(),

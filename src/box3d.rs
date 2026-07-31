@@ -264,6 +264,7 @@ pub struct Box3dCharacterController {
     pub max_tac_cos: f32,
     pub tac_cooldown: Duration,
     pub mantle_input_buffer: Duration,
+    pub climbdown_input_buffer: Duration,
     pub mantle_height: f32,
     pub mantle_speed: f32,
     pub min_mantle_cos: f32,
@@ -316,6 +317,7 @@ impl Default for Box3dCharacterController {
             max_tac_cos: 40.0_f32.to_radians().cos(),
             tac_cooldown: Duration::from_millis(300),
             mantle_input_buffer: Duration::from_millis(50),
+            climbdown_input_buffer: Duration::from_millis(150),
             mantle_height: 1.0,
             mantle_speed: 5.0,
             min_mantle_cos: 50.0_f32.to_radians().cos(),
@@ -682,6 +684,14 @@ fn run_box3d_kcc(
             &transform,
             wish_velocity,
         );
+        update_box3d_climbdown_state(
+            &runtime,
+            cfg,
+            &mut state,
+            &mut input,
+            &mut transform,
+            wish_velocity,
+        );
         handle_box3d_ledge_jump(cfg, &mut state, &mut input, look);
         if state.mantle.is_some() {
             handle_box3d_mantle_movement(
@@ -1007,6 +1017,56 @@ fn update_box3d_mantle_state(
     input.craned = None;
     input.mantled = None;
     input.jumped = None;
+}
+
+fn update_box3d_climbdown_state(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    transform: &mut Transform,
+    wish_velocity: Vec3,
+) {
+    if state.grounded.is_some() || state.mantle.is_some() {
+        return;
+    }
+    if input.last_movement.unwrap_or_default().y >= 0.0 {
+        return;
+    }
+    let Some(climbdown_time) = input.climbdown.clone() else {
+        return;
+    };
+    if climbdown_time.elapsed() > cfg.climbdown_input_buffer {
+        return;
+    }
+    if cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        Vec3::NEG_Y * cfg.crane_height,
+    )
+    .is_some()
+    {
+        return;
+    }
+
+    let original_position = transform.translation;
+    let saved_mantle_input = input.mantled.take();
+    transform.translation += Vec3::NEG_Y * cfg.crane_height;
+    input.mantled = Some(climbdown_time);
+    update_box3d_mantle_state(runtime, cfg, state, input, transform, -wish_velocity);
+    transform.translation = original_position;
+
+    if state.mantle.is_some() {
+        input.craned = None;
+        input.mantled = None;
+        input.jumped = None;
+        input.climbdown = None;
+        input.tac = None;
+    } else {
+        input.mantled = saved_mantle_input;
+    }
 }
 
 fn handle_box3d_mantle_movement(
@@ -2107,6 +2167,50 @@ mod tests {
         assert_eq!(crane.speed, cfg.crane_speed);
         assert!(input.craned.is_none());
         assert!(input.mantled.is_none());
+        assert!(input.jumped.is_none());
+    }
+
+    #[test]
+    fn climbdown_enters_mantle_from_empty_ledge() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let ledge = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.75, -1.0)));
+        let ledge_shape = ledge.create_box(
+            box3d::Vec3::new(2.0, 0.75, 0.25),
+            box3d::ShapeDef::default(),
+        );
+        let ledge_entity = Entity::from_bits(42);
+        runtime
+            .shape_entities
+            .insert(ledge_shape.id().to_bits(), ledge_entity);
+
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(bevy_math::Vec2::NEG_Y),
+            climbdown: Some(Stopwatch::new()),
+            ..Default::default()
+        };
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5 + cfg.crane_height, 0.0);
+        let original_position = transform.translation;
+
+        update_box3d_climbdown_state(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &mut transform,
+            Vec3::Z * cfg.speed,
+        );
+
+        let mantle = state.mantle.unwrap();
+        assert_eq!(mantle.wall_entity, ledge_entity);
+        assert_eq!(transform.translation, original_position);
+        assert!(input.climbdown.is_none());
         assert!(input.jumped.is_none());
     }
 
