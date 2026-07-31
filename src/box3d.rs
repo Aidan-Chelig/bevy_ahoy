@@ -1064,11 +1064,11 @@ fn handle_box3d_ledge_jump(
     input: &mut AccumulatedInput,
     look: &CharacterLook,
 ) {
+    let Some(mantle_time) = input.mantled.as_ref() else {
+        return;
+    };
     if state.mantle.is_none()
-        || input
-            .mantled
-            .as_ref()
-            .is_some_and(|mantle| mantle.elapsed() < cfg.mantle_input_buffer)
+        || mantle_time.elapsed() < cfg.mantle_input_buffer
         || input.jumped.is_none()
     {
         return;
@@ -1085,6 +1085,7 @@ fn handle_box3d_ledge_jump(
     state.mantle = None;
     state.last_tac.reset();
     input.jumped = None;
+    input.mantled = None;
     input.tac = None;
     state.velocity +=
         direction * cfg.ledge_jump_power * (2.0 * cfg.gravity * cfg.jump_height).sqrt();
@@ -2138,6 +2139,35 @@ mod tests {
         assert!(state.velocity.y > 0.0);
         assert!(state.velocity.z < 0.0);
         assert!(input.jumped.is_none());
+        assert!(input.mantled.is_none());
+    }
+
+    #[test]
+    fn held_jump_does_not_release_fresh_mantle() {
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            mantle: Some(Box3dMantleState {
+                wall_normal: Dir3::Z,
+                ledge_position: Vec3::ZERO,
+                wall_entity: Entity::from_bits(42),
+                target_position: Vec3::Y,
+                speed: cfg.mantle_speed,
+                automatic: false,
+            }),
+            ..Default::default()
+        };
+        let mut input = AccumulatedInput {
+            last_movement: Some(bevy_math::Vec2::Y),
+            jumped: Some(Stopwatch::new()),
+            mantled: None,
+            ..Default::default()
+        };
+
+        handle_box3d_ledge_jump(&cfg, &mut state, &mut input, &CharacterLook::default());
+
+        assert!(state.mantle.is_some());
+        assert_eq!(state.velocity, Vec3::ZERO);
+        assert!(input.jumped.is_some());
     }
 
     #[test]
