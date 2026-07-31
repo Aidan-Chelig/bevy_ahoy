@@ -669,21 +669,23 @@ fn run_box3d_kcc(
 ) {
     let delta = time.delta_secs();
     for (cfg, mut state, mut input, look, mut water, mut output, mut transform) in &mut characters {
-        output.mantle = None;
-        output.touching_entities.clear();
-        state.last_ground.tick(time.delta());
-        state.last_tac.tick(time.delta());
-        state.last_step_up.tick(time.delta());
-        state.last_step_down.tick(time.delta());
-        state.tac_velocity *= 0.99;
+        prepare_box3d_kcc_tick(&time, &mut state, &mut output);
+
         depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
+
         handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
         update_box3d_water(cfg, &state, &transform, &waters, &mut water);
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
-        let wish_velocity = box3d_wish_velocity(cfg, &state, &input, look);
+
+        if water.level <= WaterLevel::Feet && state.grounded.is_none() {
+            state.velocity.y -= cfg.gravity * 0.5 * delta;
+        }
+
+        let wish_velocity = calculate_wish_velocity(cfg, &state, &input, look);
+        let wish_velocity_3d = calculate_3d_wish_velocity(cfg, &state, &input, look);
         update_box3d_crane_state(
             &runtime,
             cfg,
@@ -704,15 +706,8 @@ fn run_box3d_kcc(
                 wish_velocity,
             );
         }
-        update_box3d_climbdown_state(
-            &runtime,
-            cfg,
-            &mut state,
-            &mut input,
-            &mut transform,
-            wish_velocity,
-        );
         handle_box3d_ledge_jump(cfg, &mut state, &mut input, look);
+
         if state.crane_height_left.is_some() {
             handle_box3d_crane_movement(
                 &runtime,
@@ -723,9 +718,16 @@ fn run_box3d_kcc(
                 wish_velocity,
                 delta,
             );
-            validate_box3d_velocity(cfg, &mut state);
-            continue;
         } else if state.mantle.is_some() {
+            handle_box3d_jump(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut input,
+                &transform,
+                wish_velocity,
+                delta,
+            );
             handle_box3d_mantle_movement(
                 &runtime,
                 cfg,
@@ -734,81 +736,130 @@ fn run_box3d_kcc(
                 look,
                 &mut output,
                 &mut transform,
+                wish_velocity_3d,
+                delta,
+            );
+        } else {
+            handle_box3d_jump(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut input,
+                &transform,
                 wish_velocity,
                 delta,
             );
+            apply_box3d_friction_for_state(&runtime, cfg, &mut state, &water, delta);
             validate_box3d_velocity(cfg, &mut state);
-            continue;
-        }
-
-        if state.grounded.is_none() && water.level <= WaterLevel::Feet {
-            state.velocity.y -= cfg.gravity * 0.5 * delta;
-        }
-
-        handle_box3d_jump(
-            &runtime,
-            cfg,
-            &mut state,
-            &mut input,
-            &transform,
-            wish_velocity,
-            delta,
-        );
-        if water.level > WaterLevel::Feet {
-            apply_box3d_water_friction(cfg, &mut state, delta);
-            prepare_box3d_water_velocity(cfg, &mut state, &mut input, look, delta);
-        } else if state.grounded.is_some() {
-            apply_box3d_friction(&runtime, cfg, &mut state, delta);
-            box3d_ground_accelerate(cfg, &mut state, wish_velocity, delta);
-            state.velocity.y = state.velocity.y.min(0.0);
-        } else {
-            apply_box3d_air_friction(cfg, &mut state, delta);
-            box3d_air_accelerate(cfg, &mut state, wish_velocity, delta);
-        }
-
-        validate_box3d_velocity(cfg, &mut state);
-        if water.level > WaterLevel::Feet {
-            box3d_water_move(
+            move_box3d_character_for_state(
                 &runtime,
                 cfg,
                 &mut state,
+                &mut input,
                 &mut output,
                 &mut transform,
+                &water,
+                wish_velocity,
+                look,
                 delta,
             );
-        } else if state.grounded.is_some() {
-            box3d_ground_move(
-                &runtime,
-                cfg,
-                &mut state,
-                &mut output,
-                &mut transform,
-                delta,
-            );
-        } else {
-            let movement = state.velocity * delta;
-            box3d_move_and_slide(
-                &runtime,
-                cfg,
-                &mut state,
-                &mut output,
-                &mut transform,
-                movement,
-            );
         }
+
+        let was_grounded = state.grounded.is_some();
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
-
-        if state.grounded.is_some() {
-            state.velocity.y = 0.0;
-            state.last_ground.reset();
-        } else if water.level <= WaterLevel::Feet {
-            state.velocity.y -= cfg.gravity * 0.5 * delta;
+        if was_grounded {
+            update_box3d_climbdown_state(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut input,
+                &mut transform,
+                wish_velocity,
+            );
         }
 
+        finish_box3d_kcc_tick(cfg, &water, &mut state, delta);
         validate_box3d_velocity(cfg, &mut state);
+    }
+}
+
+fn prepare_box3d_kcc_tick(
+    time: &Time,
+    state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
+) {
+    output.mantle = None;
+    output.touching_entities.clear();
+    state.last_ground.tick(time.delta());
+    state.last_tac.tick(time.delta());
+    state.last_step_up.tick(time.delta());
+    state.last_step_down.tick(time.delta());
+    state.tac_velocity *= 0.99;
+}
+
+fn apply_box3d_friction_for_state(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    water: &WaterState,
+    delta: f32,
+) {
+    if water.level > WaterLevel::Feet {
+        apply_box3d_water_friction(cfg, state, delta);
+    } else if state.grounded.is_some() {
+        apply_box3d_friction(runtime, cfg, state, delta);
+    } else {
+        apply_box3d_air_friction(cfg, state, delta);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn move_box3d_character_for_state(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    output: &mut CharacterControllerOutput,
+    transform: &mut Transform,
+    water: &WaterState,
+    wish_velocity: Vec3,
+    look: &CharacterLook,
+    delta: f32,
+) {
+    if water.level > WaterLevel::Feet {
+        prepare_box3d_water_velocity(cfg, state, input, look, delta);
+        box3d_water_move(runtime, cfg, state, output, transform, delta);
+    } else if state.grounded.is_some() {
+        ground_accelerate(cfg, state, wish_velocity, delta);
+        state.velocity.y = state.velocity.y.min(0.0);
+        box3d_ground_move(runtime, cfg, state, output, transform, delta);
+    } else {
+        air_accelerate(cfg, state, wish_velocity, delta);
+        box3d_move_and_slide(
+            runtime,
+            cfg,
+            state,
+            output,
+            transform,
+            state.velocity * delta,
+        );
+    }
+}
+
+fn finish_box3d_kcc_tick(
+    cfg: &Box3dCharacterController,
+    water: &WaterState,
+    state: &mut Box3dCharacterControllerState,
+    delta: f32,
+) {
+    if state.grounded.is_some() {
+        state.velocity.y = state.platform_velocity.y;
+        state.last_ground.reset();
+    } else if water.level <= WaterLevel::Feet {
+        state.velocity.y -= cfg.gravity * 0.5 * delta;
     }
 }
 
@@ -1028,7 +1079,7 @@ fn handle_box3d_crane_movement(
         return;
     };
     state.velocity.y = 0.0;
-    box3d_ground_accelerate(cfg, state, wish_velocity, delta);
+    ground_accelerate(cfg, state, wish_velocity, delta);
     state.velocity.y = 0.0;
     state.velocity += state.platform_velocity;
 
@@ -1459,7 +1510,7 @@ fn calculate_box3d_tac_direction(
     Some(tac_direction * groundedness * cfg.tac_power)
 }
 
-fn box3d_wish_velocity(
+fn calculate_wish_velocity(
     cfg: &Box3dCharacterController,
     state: &Box3dCharacterControllerState,
     input: &AccumulatedInput,
@@ -1484,7 +1535,7 @@ fn box3d_wish_velocity(
     wish_velocity.normalize_or_zero() * speed
 }
 
-fn box3d_3d_wish_velocity(
+fn calculate_3d_wish_velocity(
     cfg: &Box3dCharacterController,
     state: &Box3dCharacterControllerState,
     input: &AccumulatedInput,
@@ -1508,7 +1559,7 @@ fn prepare_box3d_water_velocity(
     look: &CharacterLook,
     delta: f32,
 ) {
-    let mut wish_velocity = box3d_3d_wish_velocity(cfg, state, input, look);
+    let mut wish_velocity = calculate_3d_wish_velocity(cfg, state, input, look);
     if input.swim_up {
         input.swim_up = false;
         wish_velocity += Vec3::Y * cfg.speed;
@@ -1519,7 +1570,7 @@ fn prepare_box3d_water_velocity(
     }
     wish_velocity *= cfg.water_slowdown;
 
-    box3d_water_accelerate(cfg, state, wish_velocity, delta);
+    water_accelerate(cfg, state, wish_velocity, delta);
 }
 
 fn box3d_water_move(
@@ -1536,7 +1587,7 @@ fn box3d_water_move(
     state.velocity -= state.platform_velocity;
 }
 
-fn box3d_water_accelerate(
+fn water_accelerate(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     wish_velocity: Vec3,
@@ -1554,7 +1605,7 @@ fn box3d_water_accelerate(
     state.velocity += accel_speed * wish_dir;
 }
 
-fn box3d_ground_accelerate(
+fn ground_accelerate(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     wish_velocity: Vec3,
@@ -1572,7 +1623,7 @@ fn box3d_ground_accelerate(
     state.velocity += accel_speed * wish_dir;
 }
 
-fn box3d_air_accelerate(
+fn air_accelerate(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     wish_velocity: Vec3,
@@ -2354,7 +2405,8 @@ mod tests {
             ..Default::default()
         };
 
-        let wish_velocity = box3d_wish_velocity(&cfg, &state, &input, &CharacterLook::default());
+        let wish_velocity =
+            calculate_wish_velocity(&cfg, &state, &input, &CharacterLook::default());
 
         assert!((wish_velocity.length() - cfg.air_speed).abs() < 0.0001);
     }
