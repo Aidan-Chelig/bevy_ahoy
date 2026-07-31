@@ -1500,9 +1500,15 @@ fn box3d_step_move(
     output.touching_entities = original_touching_entities;
 
     let up = Vec3::Y * cfg.step_size;
-    let up_distance = cast_box3d_character(runtime, cfg, state, transform.translation, up)
-        .map(|hit| hit.distance)
-        .unwrap_or(cfg.step_size);
+    let up_hit = cast_box3d_character(runtime, cfg, state, transform.translation, up);
+    if up_hit.is_some_and(|hit| hit.normal.y < -0.01 && hit.distance < cfg.step_size) {
+        transform.translation = down_position;
+        state.velocity = down_velocity;
+        state.tac_velocity = down_tac_velocity;
+        output.touching_entities = down_touching_entities;
+        return;
+    }
+    let up_distance = up_hit.map(|hit| hit.distance).unwrap_or(cfg.step_size);
     transform.translation.y += up_distance;
 
     let forward_probe = state.velocity.normalize_or_zero() * cfg.min_step_ledge_space;
@@ -1621,7 +1627,8 @@ fn update_box3d_grounded(
         state,
         transform.translation,
         Vec3::NEG_Y * cast_distance,
-    );
+    )
+    .or_else(|| overlap_box3d_ground(runtime, cfg, state, transform.translation));
     let old_ground = state.grounded;
     let new_ground = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
 
@@ -1629,6 +1636,37 @@ fn update_box3d_grounded(
         update_box3d_platform_velocity(runtime, state, platform_hit);
     }
     state.grounded = new_ground;
+}
+
+fn overlap_box3d_ground(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    origin: Vec3,
+) -> Option<Box3dCastHit> {
+    let points = box3d_character_points(cfg, state.crouching);
+    let mut ground = None;
+    runtime.world.collide_mover(
+        to_box3d_vec3(origin),
+        points,
+        cfg.radius,
+        box3d::QueryFilter::default(),
+        |shape, plane| {
+            let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
+            if normal.y >= cfg.min_walk_cos {
+                ground = Some(Box3dCastHit {
+                    entity: runtime.shape_entity(shape.id()),
+                    distance: 0.0,
+                    point: from_box3d_vec3(plane.point),
+                    normal,
+                    collision_distance: 0.0,
+                });
+                return false;
+            }
+            true
+        },
+    );
+    ground
 }
 
 fn update_box3d_platform_velocity(
@@ -2308,6 +2346,168 @@ mod tests {
         let feet_y = transform.translation.y - cfg.height * 0.5;
         assert!(feet_y >= -0.0001, "{transform:?}");
         assert!(state.velocity.y >= -0.0001, "{:?}", state.velocity);
+        assert!(state.grounded.is_some(), "{state:?}");
+    }
+
+    #[test]
+    fn low_overhead_platform_keeps_character_on_moving_platform() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let moving = runtime
+            .world
+            .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::new(
+                0.0, 1.5, -7.0,
+            )));
+        let _moving_shape =
+            moving.create_box(box3d::Vec3::new(1.5, 0.15, 1.5), box3d::ShapeDef::default());
+        let overhead = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                -2.0, 1.75, -7.0,
+            )));
+        let _overhead_shape =
+            overhead.create_box(box3d::Vec3::new(2.0, 0.15, 1.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let platform_top = 1.65;
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_X * 12.0,
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::new(0.0, platform_top, -7.0),
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.8, platform_top + cfg.height * 0.5, -7.0);
+
+        box3d_ground_move(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            1.0 / 60.0,
+        );
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= platform_top - 0.0001, "{transform:?}");
+        assert!(state.grounded.is_some(), "{state:?}");
+    }
+
+    #[test]
+    fn grounded_depenetration_does_not_push_character_below_moving_platform() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let moving = runtime
+            .world
+            .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::new(
+                0.0, 1.5, -7.0,
+            )));
+        let _moving_shape =
+            moving.create_box(box3d::Vec3::new(1.5, 0.15, 1.5), box3d::ShapeDef::default());
+        let overhead = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                -2.0, 1.75, -7.0,
+            )));
+        let _overhead_shape =
+            overhead.create_box(box3d::Vec3::new(2.0, 0.15, 1.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let platform_top = 1.65;
+        let mut state = Box3dCharacterControllerState {
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::new(0.0, platform_top, -7.0),
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut transform = Transform::from_xyz(0.65, platform_top + cfg.height * 0.5, -7.0);
+
+        depenetrate_box3d_character(&runtime, &cfg, &state, &mut transform);
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= platform_top - 0.0001, "{transform:?}");
+        assert!(state.grounded.is_some(), "{state:?}");
+    }
+
+    #[test]
+    fn grounded_probe_accepts_tiny_floor_overlap() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let moving = runtime
+            .world
+            .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::new(
+                0.0, 1.5, -7.0,
+            )));
+        let _moving_shape =
+            moving.create_box(box3d::Vec3::new(1.5, 0.15, 1.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let platform_top = 1.65;
+        let mut state = Box3dCharacterControllerState::default();
+        let transform = Transform::from_xyz(0.0, platform_top + cfg.height * 0.5 - 0.002, -7.0);
+
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        assert!(state.grounded.is_some(), "{state:?}");
+        let ground = state.grounded.unwrap();
+        assert!(ground.normal.y >= cfg.min_walk_cos, "{ground:?}");
+    }
+
+    #[test]
+    fn low_head_platform_contact_keeps_floor_grounding() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape = floor.create_box(
+            box3d::Vec3::new(10.0, 0.5, 10.0),
+            box3d::ShapeDef::default(),
+        );
+        let overhead = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                -2.0, 1.75, -7.0,
+            )));
+        let _overhead_shape =
+            overhead.create_box(box3d::Vec3::new(2.0, 0.15, 1.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_X * 12.0,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.8, cfg.height * 0.5, -7.0);
+
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+        box3d_ground_move(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            1.0 / 60.0,
+        );
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= -0.0001, "{transform:?}");
         assert!(state.grounded.is_some(), "{state:?}");
     }
 
