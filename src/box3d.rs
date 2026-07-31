@@ -1378,6 +1378,21 @@ fn box3d_move_and_slide(
             break;
         }
 
+        if add_box3d_overlap_planes(
+            runtime,
+            cfg,
+            state,
+            transform.translation,
+            remaining,
+            &mut planes,
+        ) {
+            let old_velocity = state.velocity;
+            state.velocity = clip_box3d_kcc_vector(state.velocity, &planes);
+            state.tac_velocity += (old_velocity - state.velocity).length();
+            remaining = clip_box3d_kcc_vector(remaining, &planes);
+            continue;
+        }
+
         let Some(hit) = cast_box3d_character(runtime, cfg, state, transform.translation, remaining)
         else {
             transform.translation += remaining;
@@ -1389,7 +1404,9 @@ fn box3d_move_and_slide(
         let travel = hit.distance.max(0.0);
         let direction = remaining.normalize_or_zero();
         transform.translation += direction * travel;
-        transform.translation += hit.normal * cfg.skin_width;
+        if hit.normal.y >= -0.01 {
+            transform.translation += hit.normal * cfg.skin_width;
+        }
 
         if !planes.iter().any(|plane: &box3d::CollisionPlane| {
             from_box3d_vec3(plane.plane().normal).dot(hit.normal) > 0.999
@@ -1400,14 +1417,58 @@ fn box3d_move_and_slide(
             }));
         }
         let old_velocity = state.velocity;
-        state.velocity =
-            from_box3d_vec3(box3d::clip_vector(to_box3d_vec3(state.velocity), &planes));
+        state.velocity = clip_box3d_kcc_vector(state.velocity, &planes);
         state.tac_velocity += (old_velocity - state.velocity).length();
 
         let traveled = direction * travel;
         remaining -= traveled;
-        remaining = from_box3d_vec3(box3d::clip_vector(to_box3d_vec3(remaining), &planes));
+        remaining = clip_box3d_kcc_vector(remaining, &planes);
     }
+}
+
+fn clip_box3d_kcc_vector(mut vector: Vec3, planes: &[box3d::CollisionPlane]) -> Vec3 {
+    for plane in planes {
+        let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
+        let into = vector.dot(normal);
+        if into < 0.0 {
+            vector -= normal * into;
+        }
+    }
+    vector
+}
+
+fn add_box3d_overlap_planes(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    origin: Vec3,
+    movement: Vec3,
+    planes: &mut Vec<box3d::CollisionPlane>,
+) -> bool {
+    let points = box3d_character_points(cfg, state.crouching);
+    let mut added = false;
+    runtime.world.collide_mover(
+        to_box3d_vec3(origin),
+        points,
+        cfg.radius,
+        box3d::QueryFilter::default(),
+        |_, plane| {
+            let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
+            if movement.dot(normal) < -1.0e-4
+                && !planes
+                    .iter()
+                    .any(|existing| from_box3d_vec3(existing.plane().normal).dot(normal) > 0.999)
+            {
+                planes.push(box3d::CollisionPlane::rigid(box3d::Plane {
+                    normal: to_box3d_vec3(normal),
+                    offset: 0.0,
+                }));
+                added = true;
+            }
+            planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
+        },
+    );
+    added
 }
 
 fn box3d_step_move(
@@ -1741,6 +1802,36 @@ fn cast_box3d_character(
             hit.fraction
         },
     );
+    if closest.is_none() && movement.y > 0.0 {
+        let direction = movement / distance;
+        let cast_movement = movement + direction * cfg.skin_width;
+        let cast_distance = cast_movement.length();
+        runtime.world.cast_shape(
+            to_box3d_vec3(origin - direction * cfg.skin_width),
+            proxy,
+            to_box3d_vec3(cast_movement),
+            box3d::QueryFilter::default(),
+            |hit| {
+                let collision_distance = hit.fraction * cast_distance;
+                let normal = from_box3d_vec3(hit.normal).normalize_or_zero();
+                if movement.dot(normal) >= -1.0e-4 {
+                    return closest
+                        .map(|hit| hit.collision_distance / cast_distance)
+                        .unwrap_or(1.0);
+                }
+                let safe_distance = (collision_distance - cfg.skin_width).max(0.0);
+                let shape = hit.shape.id();
+                closest = Some(Box3dCastHit {
+                    entity: runtime.shape_entity(shape),
+                    distance: safe_distance.min(distance),
+                    point: from_box3d_vec3(hit.point),
+                    normal,
+                    collision_distance,
+                });
+                hit.fraction
+            },
+        );
+    }
     closest
 }
 
@@ -2081,6 +2172,83 @@ mod tests {
 
         assert!(transform.translation.z < -0.45, "{transform:?}");
         assert!(state.velocity.z < -0.99, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ceiling_hit_does_not_push_character_through_floor() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.95, 0.0)));
+        let _ceiling_shape =
+            ceiling.create_box(box3d::Vec3::new(5.0, 0.05, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::Y * 4.0,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::Y * 0.3,
+        );
+        depenetrate_box3d_character(&runtime, &cfg, &state, &mut transform);
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= -0.0001, "{transform:?}");
+        assert!(state.velocity.y <= 0.0001, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ceiling_contact_clips_upward_velocity() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.85, 0.0)));
+        let _ceiling_shape =
+            ceiling.create_box(box3d::Vec3::new(5.0, 0.05, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::Y * 4.0,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::Y * 0.2,
+        );
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= -0.0001, "{transform:?}");
+        assert!(state.velocity.y <= 0.0001, "{:?}", state.velocity);
     }
 
     #[test]
