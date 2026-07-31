@@ -271,8 +271,11 @@ pub struct Box3dCharacterController {
     pub mantle_speed: f32,
     pub min_mantle_cos: f32,
     pub min_mantle_ledge_space: f32,
+    pub min_ledge_grab_space: Vec3,
     pub max_ledge_grab_distance: f32,
     pub climb_pull_up_height: f32,
+    pub climb_reverse_sin: f32,
+    pub climb_sensitivity: f32,
     pub ledge_jump_power: f32,
     pub ledge_jump_factor: f32,
     pub crane_input_buffer: Duration,
@@ -328,8 +331,11 @@ impl Default for Box3dCharacterController {
             mantle_speed: 5.0,
             min_mantle_cos: 50.0_f32.to_radians().cos(),
             min_mantle_ledge_space: 0.5,
+            min_ledge_grab_space: Vec3::new(0.2, 0.1, 0.2),
             max_ledge_grab_distance: 0.3,
             climb_pull_up_height: 0.3,
+            climb_reverse_sin: 40.0_f32.to_radians().sin(),
+            climb_sensitivity: 2.5,
             ledge_jump_power: 1.5,
             ledge_jump_factor: 0.8,
             crane_input_buffer: Duration::from_millis(200),
@@ -725,8 +731,10 @@ fn run_box3d_kcc(
                 cfg,
                 &mut state,
                 &input,
+                look,
                 &mut output,
                 &mut transform,
+                wish_velocity,
                 delta,
             );
             validate_box3d_velocity(cfg, &mut state);
@@ -1145,8 +1153,8 @@ fn update_box3d_mantle_state(
         return;
     };
 
-    let hand_radius = 0.05;
-    let inward_distance = cfg.radius + cfg.skin_width + cfg.min_mantle_ledge_space + hand_radius;
+    let hand_radius = (cfg.min_ledge_grab_space.x.max(cfg.min_ledge_grab_space.z) * 0.5).max(0.01);
+    let inward_distance = cfg.radius + cfg.skin_width + cfg.min_ledge_grab_space.z * 0.5;
     let probe_start = transform.translation + Vec3::Y * (cfg.height * 0.5 + cfg.mantle_height)
         - *wall_normal * inward_distance;
     let probe_distance = cfg.height + cfg.mantle_height;
@@ -1247,8 +1255,10 @@ fn handle_box3d_mantle_movement(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
     input: &AccumulatedInput,
+    look: &CharacterLook,
     output: &mut CharacterControllerOutput,
     transform: &mut Transform,
+    wish_velocity: Vec3,
     delta: f32,
 ) {
     let Some(mantle) = state.mantle else {
@@ -1261,9 +1271,6 @@ fn handle_box3d_mantle_movement(
     });
     state.velocity = Vec3::ZERO;
 
-    if !mantle.automatic && input.last_movement.unwrap_or_default().y <= 0.0 {
-        return;
-    }
     let to_target = mantle.target_position - transform.translation;
     if to_target.length_squared() <= cfg.skin_width * cfg.skin_width {
         transform.translation = mantle.target_position;
@@ -1272,9 +1279,18 @@ fn handle_box3d_mantle_movement(
         return;
     }
 
-    let vertical = Vec3::Y * to_target.y.max(0.0);
-    let desired = if vertical.length_squared() > cfg.skin_width * cfg.skin_width {
-        vertical
+    let climb_factor = if mantle.automatic {
+        1.0
+    } else {
+        calculate_box3d_climb_factor(cfg, input, look, wish_velocity)
+    };
+    if !mantle.automatic && climb_factor.abs() <= f32::EPSILON {
+        return;
+    }
+
+    let vertical_left = to_target.y.max(0.0);
+    let desired = if vertical_left > cfg.skin_width {
+        Vec3::Y * (mantle.speed * delta * climb_factor).clamp(-vertical_left, vertical_left)
     } else {
         to_target
     };
@@ -1289,6 +1305,21 @@ fn handle_box3d_mantle_movement(
     if travel.length_squared() + f32::EPSILON < movement.length_squared() {
         state.mantle = None;
     }
+}
+
+fn calculate_box3d_climb_factor(
+    cfg: &Box3dCharacterController,
+    input: &AccumulatedInput,
+    look: &CharacterLook,
+    wish_velocity: Vec3,
+) -> f32 {
+    if wish_velocity.length_squared() < 0.01 {
+        return 0.0;
+    }
+    let movement = input.last_movement.unwrap_or_default().y;
+    let cos = (kcc::forward(look.to_quat()) * movement.abs()).y;
+    let factor = ((cos + cfg.climb_reverse_sin) * cfg.climb_sensitivity).clamp(-1.0, 1.0);
+    if movement < 0.0 { -factor } else { factor }
 }
 
 fn handle_box3d_ledge_jump(
@@ -2377,6 +2408,35 @@ mod tests {
         );
 
         assert!(state.grounded.is_none());
+    }
+
+    #[test]
+    fn climb_factor_uses_input_and_look_pitch() {
+        let cfg = Box3dCharacterController::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(bevy_math::Vec2::Y),
+            ..Default::default()
+        };
+        let look = CharacterLook {
+            pitch: 0.0,
+            ..Default::default()
+        };
+
+        let forward = calculate_box3d_climb_factor(&cfg, &input, &look, Vec3::NEG_Z * cfg.speed);
+        assert!(forward > 0.0, "{forward}");
+
+        input.last_movement = Some(bevy_math::Vec2::NEG_Y);
+        let backward = calculate_box3d_climb_factor(&cfg, &input, &look, Vec3::Z * cfg.speed);
+        assert!(backward < 0.0, "{backward}");
+
+        input.last_movement = Some(bevy_math::Vec2::Y);
+        let looking_down = CharacterLook {
+            pitch: -std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let stalled =
+            calculate_box3d_climb_factor(&cfg, &input, &looking_down, Vec3::NEG_Z * cfg.speed);
+        assert!(stalled < forward, "{stalled} >= {forward}");
     }
 
     #[test]
