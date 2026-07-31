@@ -21,7 +21,7 @@ use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
+    CharacterController, CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
     input::AccumulatedInput,
     kcc,
     water::{WaterLevel, WaterState},
@@ -37,8 +37,8 @@ pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
-        Box3dCharacterControllerState, Box3dColliderShape, Box3dMantleState, Box3dRuntime,
-        Box3dWater,
+        Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dMantleState,
+        Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime, Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -68,7 +68,8 @@ impl Default for AhoyBox3dPlugin {
 
 impl Plugin for AhoyBox3dPlugin {
     fn build(&self, app: &mut bevy_app::App) {
-        app.insert_resource(self.config)
+        app.add_message::<Box3dPickupInput>()
+            .insert_resource(self.config)
             .insert_non_send_resource(Box3dRuntime::new(self.config))
             .add_systems(
                 FixedUpdate,
@@ -79,6 +80,8 @@ impl Plugin for AhoyBox3dPlugin {
                     create_box3d_shapes,
                     sync_box3d_body_changes,
                     sync_box3d_velocity_changes,
+                    handle_box3d_pickup_input,
+                    update_box3d_pickup_holds,
                     step_box3d,
                     run_box3d_kcc,
                     spin_box3d_character_look,
@@ -149,8 +152,17 @@ impl AhoyBox3dBody {
 /// Collider shape for Ahoy's lightweight Box3D runtime.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Box3dColliderShape {
-    Cuboid { half_extents: Vec3 },
-    Sphere { radius: f32 },
+    Cuboid {
+        half_extents: Vec3,
+    },
+    CuboidAt {
+        half_extents: Vec3,
+        translation: Vec3,
+        rotation: Quat,
+    },
+    Sphere {
+        radius: f32,
+    },
 }
 
 /// Collider component for Ahoy's lightweight Box3D runtime.
@@ -172,6 +184,23 @@ impl AhoyBox3dCollider {
         }
     }
 
+    pub fn cuboid_from_size(size: Vec3) -> Self {
+        Self::cuboid(size * 0.5)
+    }
+
+    pub const fn cuboid_at(half_extents: Vec3, translation: Vec3, rotation: Quat) -> Self {
+        Self {
+            shape: Box3dColliderShape::CuboidAt {
+                half_extents,
+                translation,
+                rotation,
+            },
+            density: 1.0,
+            friction: 0.6,
+            sensor: false,
+        }
+    }
+
     pub const fn sphere(radius: f32) -> Self {
         Self {
             shape: Box3dColliderShape::Sphere { radius },
@@ -179,6 +208,21 @@ impl AhoyBox3dCollider {
             friction: 0.6,
             sensor: false,
         }
+    }
+
+    pub const fn with_density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+
+    pub const fn with_friction(mut self, friction: f32) -> Self {
+        self.friction = friction;
+        self
+    }
+
+    pub const fn sensor(mut self) -> Self {
+        self.sensor = true;
+        self
     }
 }
 
@@ -225,6 +269,50 @@ pub struct AhoyBox3dNativeBody {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Component)]
 pub struct AhoyBox3dShape {
     pub id: box3d::ShapeId,
+}
+
+/// Source-style pickup actor for dynamic Box3D bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[require(Transform, CharacterLook)]
+pub struct Box3dPickupActor {
+    pub prop_filter: box3d::QueryFilter,
+    pub max_distance: f32,
+    pub preferred_distance: f32,
+    pub hold_hz: f32,
+    pub throw_speed: f32,
+    pub max_prop_mass: f32,
+}
+
+impl Default for Box3dPickupActor {
+    fn default() -> Self {
+        Self {
+            prop_filter: box3d::QueryFilter::default(),
+            max_distance: 3.0,
+            preferred_distance: 1.0,
+            hold_hz: 14.0,
+            throw_speed: 12.0,
+            max_prop_mass: 1000.0,
+        }
+    }
+}
+
+/// Body currently held by a [`Box3dPickupActor`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Component)]
+pub struct Box3dHolding {
+    pub body: Entity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Box3dPickupAction {
+    Pull,
+    Drop,
+    Throw,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Message)]
+pub struct Box3dPickupInput {
+    pub action: Box3dPickupAction,
+    pub actor: Entity,
 }
 
 /// Source-style kinematic character controller backed by Box3D shape casts.
@@ -297,62 +385,68 @@ pub struct Box3dCharacterController {
 
 impl Default for Box3dCharacterController {
     fn default() -> Self {
+        Self::from(CharacterController::default())
+    }
+}
+
+impl From<CharacterController> for Box3dCharacterController {
+    fn from(value: CharacterController) -> Self {
         Self {
             height: 1.8,
-            crouch_height: 1.3,
+            crouch_height: value.crouch_height,
             radius: 0.7,
-            view_height: 1.7,
-            crouch_view_height: 1.2,
-            crouch_speed_scale: 1.0 / 3.0,
-            ground_distance: 0.05,
-            min_walk_cos: 40.0_f32.to_radians().cos(),
-            stop_speed: 2.54,
-            friction_hz: 12.0,
-            acceleration_hz: 8.0,
-            air_acceleration_hz: 12.0,
-            water_acceleration_hz: 12.0,
-            water_slowdown: 0.6,
-            water_gravity: 2.4,
-            gravity: 29.0,
-            speed: 12.0,
-            air_speed: 1.5,
-            max_speed: 100.0,
-            max_air_wish_speed: 0.76,
-            jump_height: 1.8,
+            view_height: value.standing_view_height,
+            crouch_view_height: value.crouch_view_height,
+            crouch_speed_scale: value.crouch_speed_scale,
+            ground_distance: value.ground_distance,
+            min_walk_cos: value.min_walk_cos,
+            stop_speed: value.stop_speed,
+            friction_hz: value.friction_hz,
+            acceleration_hz: value.acceleration_hz,
+            air_acceleration_hz: value.air_acceleration_hz,
+            water_acceleration_hz: value.water_acceleration_hz,
+            water_slowdown: value.water_slowdown,
+            water_gravity: value.water_gravity,
+            gravity: value.gravity,
+            speed: value.speed,
+            air_speed: value.air_speed,
+            max_speed: value.max_speed,
+            max_air_wish_speed: value.max_air_wish_speed,
+            jump_height: value.jump_height,
             air_friction: 0.0,
-            tac_power: 0.755,
-            tac_jump_factor: 1.0,
-            tac_input_buffer: Duration::from_millis(150),
-            max_tac_cos: 40.0_f32.to_radians().cos(),
-            tac_cooldown: Duration::from_millis(300),
-            mantle_input_buffer: Duration::from_millis(50),
-            climbdown_input_buffer: Duration::from_millis(150),
-            mantle_height: 1.0,
-            mantle_speed: 5.0,
-            min_mantle_cos: 50.0_f32.to_radians().cos(),
-            min_mantle_ledge_space: 0.5,
-            min_ledge_grab_space: Vec3::new(0.2, 0.1, 0.2),
-            max_ledge_grab_distance: 0.3,
-            climb_pull_up_height: 0.3,
-            climb_reverse_sin: 40.0_f32.to_radians().sin(),
-            climb_sensitivity: 2.5,
-            ledge_jump_power: 1.5,
-            ledge_jump_factor: 0.8,
-            crane_input_buffer: Duration::from_millis(200),
-            crane_height: 1.5,
-            crane_speed: 11.0,
-            min_crane_cos: 50.0_f32.to_radians().cos(),
-            min_crane_ledge_space: 0.35,
-            jump_crane_chain_time: Duration::from_millis(140),
-            unground_speed: 10.0,
-            coyote_time: Duration::from_millis(100),
-            jump_input_buffer: Duration::from_millis(150),
-            skin_width: 0.015,
-            max_slides: 4,
+            tac_power: value.tac_power,
+            tac_jump_factor: value.tac_jump_factor,
+            tac_input_buffer: value.tac_input_buffer,
+            max_tac_cos: value.max_tac_cos,
+            tac_cooldown: value.tac_cooldown,
+            mantle_input_buffer: value.mantle_input_buffer,
+            climbdown_input_buffer: value.climbdown_input_buffer,
+            mantle_height: value.mantle_height,
+            mantle_speed: value.mantle_speed,
+            min_mantle_cos: value.min_mantle_cos,
+            min_mantle_ledge_space: value.min_mantle_ledge_space,
+            min_ledge_grab_space: value.min_ledge_grab_space.half_size * 2.0,
+            max_ledge_grab_distance: value.max_ledge_grab_distance,
+            climb_pull_up_height: value.climb_pull_up_height,
+            climb_reverse_sin: value.climb_reverse_sin,
+            climb_sensitivity: value.climb_sensitivity,
+            ledge_jump_power: value.ledge_jump_power,
+            ledge_jump_factor: value.ledge_jump_factor,
+            crane_input_buffer: value.crane_input_buffer,
+            crane_height: value.crane_height,
+            crane_speed: value.crane_speed,
+            min_crane_cos: value.min_crane_cos,
+            min_crane_ledge_space: value.min_crane_ledge_space,
+            jump_crane_chain_time: value.jump_crane_chain_time,
+            unground_speed: value.unground_speed,
+            coyote_time: value.coyote_time,
+            jump_input_buffer: value.jump_input_buffer,
+            skin_width: value.move_and_slide.skin_width,
+            max_slides: value.move_and_slide.max_planes,
             push_mass: 80.0,
-            step_size: 0.7,
-            step_down_detection_distance: 0.2,
-            min_step_ledge_space: 0.2,
+            step_size: value.step_size,
+            step_down_detection_distance: value.step_down_detection_distance,
+            min_step_ledge_space: value.min_step_ledge_space,
         }
     }
 }
@@ -372,6 +466,7 @@ pub struct Box3dCharacterControllerState {
     pub last_tac: Stopwatch,
     pub last_step_up: Stopwatch,
     pub last_step_down: Stopwatch,
+    pub held_body: Option<Entity>,
 }
 
 impl Default for Box3dCharacterControllerState {
@@ -391,6 +486,7 @@ impl Default for Box3dCharacterControllerState {
             last_tac: max_stopwatch(),
             last_step_up: max_stopwatch(),
             last_step_down: max_stopwatch(),
+            held_body: None,
         }
     }
 }
@@ -591,6 +687,18 @@ fn create_box3d_shapes(
             Box3dColliderShape::Cuboid { half_extents } => {
                 body.create_box(to_box3d_vec3(half_extents), def)
             }
+            Box3dColliderShape::CuboidAt {
+                half_extents,
+                translation,
+                rotation,
+            } => body.create_transformed_box(
+                to_box3d_vec3(half_extents),
+                box3d::Transform {
+                    p: to_box3d_vec3(translation),
+                    q: to_box3d_quat(rotation),
+                },
+                def,
+            ),
             Box3dColliderShape::Sphere { radius } => {
                 body.create_sphere(box3d::Vec3::ZERO, radius, def)
             }
@@ -634,6 +742,131 @@ fn sync_box3d_velocity_changes(
             .id
             .set_angular_velocity(to_box3d_vec3(velocity.angular));
     }
+}
+
+fn handle_box3d_pickup_input(
+    mut commands: Commands,
+    runtime: NonSend<Box3dRuntime>,
+    mut inputs: MessageReader<Box3dPickupInput>,
+    actors: Query<(
+        &Box3dPickupActor,
+        &Transform,
+        &CharacterLook,
+        Option<&Box3dHolding>,
+    )>,
+    mut character_states: Query<&mut Box3dCharacterControllerState>,
+) {
+    for input in inputs.read() {
+        match input.action {
+            Box3dPickupAction::Pull => {
+                let Ok((actor, transform, look, holding)) = actors.get(input.actor) else {
+                    continue;
+                };
+                if holding.is_some() {
+                    continue;
+                }
+                let Some(body_entity) =
+                    find_box3d_pickup_body(&runtime, actor, transform.translation, look)
+                else {
+                    continue;
+                };
+                commands
+                    .entity(input.actor)
+                    .insert(Box3dHolding { body: body_entity });
+                if let Ok(mut state) = character_states.get_mut(input.actor) {
+                    state.held_body = Some(body_entity);
+                }
+            }
+            Box3dPickupAction::Drop | Box3dPickupAction::Throw => {
+                let Ok((actor, _transform, look, holding)) = actors.get(input.actor) else {
+                    continue;
+                };
+                let Some(holding) = holding else {
+                    continue;
+                };
+                if input.action == Box3dPickupAction::Throw
+                    && let Some(body) = runtime.body(holding.body)
+                    && body.is_valid()
+                {
+                    body.set_linear_velocity(to_box3d_vec3(
+                        box3d_pickup_forward(look) * actor.throw_speed,
+                    ));
+                }
+                commands.entity(input.actor).remove::<Box3dHolding>();
+                if let Ok(mut state) = character_states.get_mut(input.actor) {
+                    state.held_body = None;
+                }
+            }
+        }
+    }
+}
+
+fn update_box3d_pickup_holds(
+    runtime: NonSend<Box3dRuntime>,
+    time: Res<Time>,
+    actors: Query<(&Box3dPickupActor, &Transform, &CharacterLook, &Box3dHolding)>,
+) {
+    let delta = time.delta_secs();
+    if delta <= 0.0 {
+        return;
+    }
+    for (actor, transform, look, holding) in &actors {
+        let Some(body) = runtime.body(holding.body) else {
+            continue;
+        };
+        if !body.is_valid() || body.body_type() != box3d::BodyType::Dynamic {
+            continue;
+        }
+        let target =
+            transform.translation + box3d_pickup_forward(look) * actor.preferred_distance.max(0.0);
+        let position = from_box3d_vec3(body.world_center_of_mass());
+        let desired_velocity = (target - position) * actor.hold_hz.max(0.0);
+        body.set_linear_velocity(to_box3d_vec3(desired_velocity));
+        body.set_angular_velocity(box3d::Vec3::ZERO);
+    }
+}
+
+fn find_box3d_pickup_body(
+    runtime: &Box3dRuntime,
+    actor: &Box3dPickupActor,
+    origin: Vec3,
+    look: &CharacterLook,
+) -> Option<Entity> {
+    let mut hit_body = None;
+    runtime.world.cast_ray(
+        to_box3d_vec3(origin),
+        to_box3d_vec3(box3d_pickup_forward(look) * actor.max_distance.max(0.0)),
+        actor.prop_filter,
+        |hit| {
+            let Some(shape_entity) = runtime.shape_entity(hit.shape.id()) else {
+                return 1.0;
+            };
+            let Some(body_entity) = runtime.shape_bodies.get(&shape_entity).copied() else {
+                return 1.0;
+            };
+            let Some(body) = runtime.body(body_entity) else {
+                return 1.0;
+            };
+            if !body.is_valid() || body.body_type() != box3d::BodyType::Dynamic {
+                return hit.fraction;
+            }
+            let inverse_mass = body.inverse_mass();
+            if inverse_mass <= 0.0 {
+                return hit.fraction;
+            }
+            let mass = inverse_mass.recip();
+            if mass > actor.max_prop_mass {
+                return hit.fraction;
+            }
+            hit_body = Some(body_entity);
+            hit.fraction
+        },
+    );
+    hit_body
+}
+
+fn box3d_pickup_forward(look: &CharacterLook) -> Vec3 {
+    look.to_quat() * Vec3::NEG_Z
 }
 
 fn step_box3d(config: Res<AhoyBox3dConfig>, time: Res<Time>, runtime: NonSend<Box3dRuntime>) {
@@ -1823,7 +2056,10 @@ fn add_box3d_overlap_planes(
         points,
         cfg.radius,
         box3d::QueryFilter::default(),
-        |_, plane| {
+        |shape, plane| {
+            if box3d_state_holds_shape(runtime, state, shape.id()) {
+                return true;
+            }
             let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
             if movement.dot(normal) < -1.0e-4
                 && !planes
@@ -2028,6 +2264,9 @@ fn overlap_box3d_ground(
         cfg.radius,
         box3d::QueryFilter::default(),
         |shape, plane| {
+            if box3d_state_holds_shape(runtime, state, shape.id()) {
+                return true;
+            }
             let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
             if normal.y >= cfg.min_walk_cos {
                 ground = Some(Box3dCastHit {
@@ -2167,7 +2406,10 @@ fn depenetrate_box3d_character(
         points,
         cfg.radius,
         box3d::QueryFilter::default(),
-        |_, plane| {
+        |shape, plane| {
+            if box3d_state_holds_shape(runtime, state, shape.id()) {
+                return true;
+            }
             planes.push(box3d::CollisionPlane::rigid(plane.plane));
             planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
         },
@@ -2201,6 +2443,9 @@ fn cast_box3d_character(
         to_box3d_vec3(movement),
         box3d::QueryFilter::default(),
         |hit| {
+            if box3d_state_holds_shape(runtime, state, hit.shape.id()) {
+                return 1.0;
+            }
             let collision_distance = hit.fraction * distance;
             let normal = from_box3d_vec3(hit.normal).normalize_or_zero();
             if movement.dot(normal) >= -1.0e-4 {
@@ -2230,6 +2475,9 @@ fn cast_box3d_character(
             to_box3d_vec3(cast_movement),
             box3d::QueryFilter::default(),
             |hit| {
+                if box3d_state_holds_shape(runtime, state, hit.shape.id()) {
+                    return 1.0;
+                }
                 let collision_distance = hit.fraction * cast_distance;
                 let normal = from_box3d_vec3(hit.normal).normalize_or_zero();
                 if movement.dot(normal) >= -1.0e-4 {
@@ -2251,6 +2499,20 @@ fn cast_box3d_character(
         );
     }
     closest
+}
+
+fn box3d_state_holds_shape(
+    runtime: &Box3dRuntime,
+    state: &Box3dCharacterControllerState,
+    shape: box3d::ShapeId,
+) -> bool {
+    let Some(held_body) = state.held_body else {
+        return false;
+    };
+    let Some(shape_entity) = runtime.shape_entity(shape) else {
+        return false;
+    };
+    runtime.shape_bodies.get(&shape_entity) == Some(&held_body)
 }
 
 fn cast_box3d_sphere(
@@ -2321,6 +2583,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn box3d_defaults_track_avian_controller_defaults() {
+        let avian = CharacterController::default();
+        let box3d = Box3dCharacterController::default();
+
+        assert_eq!(box3d.crouch_height, avian.crouch_height);
+        assert_eq!(box3d.view_height, avian.standing_view_height);
+        assert_eq!(box3d.speed, avian.speed);
+        assert_eq!(box3d.air_speed, avian.air_speed);
+        assert_eq!(box3d.jump_height, avian.jump_height);
+        assert_eq!(box3d.crane_height, avian.crane_height);
+        assert_eq!(box3d.mantle_height, avian.mantle_height);
+        assert_eq!(box3d.skin_width, avian.move_and_slide.skin_width);
+        assert_eq!(box3d.max_slides, avian.move_and_slide.max_planes);
+    }
+
+    #[test]
     fn crouching_keeps_capsule_feet_fixed() {
         let cfg = Box3dCharacterController::default();
         let standing = box3d_character_points(&cfg, false);
@@ -2368,6 +2646,89 @@ mod tests {
 
         assert!(box3d_character_intersects(&runtime, &cfg, origin, false));
         assert!(!box3d_character_intersects(&runtime, &cfg, origin, true));
+    }
+
+    #[test]
+    fn held_body_is_ignored_by_character_casts() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let body_entity = Entity::from_bits(42);
+        let shape_entity = body_entity;
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.9, -1.0)));
+        let shape = wall.create_box(box3d::Vec3::new(1.0, 0.9, 0.1), box3d::ShapeDef::default());
+        let body_id = wall.id();
+        let shape_id = shape.id();
+        runtime.bodies.insert(body_entity, body_id);
+        runtime.shapes.insert(shape_entity, shape_id);
+        runtime.shape_bodies.insert(shape_entity, body_entity);
+        runtime
+            .shape_entities
+            .insert(shape_id.to_bits(), shape_entity);
+
+        let cfg = Box3dCharacterController::default();
+        let clear_state = Box3dCharacterControllerState::default();
+        let held_state = Box3dCharacterControllerState {
+            held_body: Some(body_entity),
+            ..Default::default()
+        };
+        let origin = Vec3::Y * cfg.height * 0.5;
+
+        assert!(
+            cast_box3d_character(&runtime, &cfg, &clear_state, origin, Vec3::NEG_Z * 2.0).is_some()
+        );
+        assert!(
+            cast_box3d_character(&runtime, &cfg, &held_state, origin, Vec3::NEG_Z * 2.0).is_none()
+        );
+    }
+
+    #[test]
+    fn pickup_ray_stops_at_static_body() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let wall_entity = Entity::from_bits(41);
+        let prop_entity = Entity::from_bits(42);
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.0, -1.0)));
+        let wall_shape =
+            wall.create_box(box3d::Vec3::new(0.5, 0.5, 0.05), box3d::ShapeDef::default());
+        let prop = runtime
+            .world
+            .create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::new(0.0, 0.0, -2.0)));
+        let prop_shape = prop.create_box(
+            box3d::Vec3::new(0.25, 0.25, 0.25),
+            box3d::ShapeDef {
+                density: 1.0,
+                ..Default::default()
+            },
+        );
+        runtime.bodies.insert(wall_entity, wall.id());
+        runtime.shapes.insert(wall_entity, wall_shape.id());
+        runtime.shape_bodies.insert(wall_entity, wall_entity);
+        runtime
+            .shape_entities
+            .insert(wall_shape.id().to_bits(), wall_entity);
+        runtime.bodies.insert(prop_entity, prop.id());
+        runtime.shapes.insert(prop_entity, prop_shape.id());
+        runtime.shape_bodies.insert(prop_entity, prop_entity);
+        runtime
+            .shape_entities
+            .insert(prop_shape.id().to_bits(), prop_entity);
+
+        let picked = find_box3d_pickup_body(
+            &runtime,
+            &Box3dPickupActor::default(),
+            Vec3::ZERO,
+            &CharacterLook::default(),
+        );
+
+        assert_eq!(picked, None);
     }
 
     #[test]

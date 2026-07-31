@@ -7,7 +7,10 @@ use bevy_ahoy::{
     AhoyFixedUpdateUtilsPlugin, AhoyInputPlugin,
     box3d::prelude::*,
     camera::AhoyCameraPlugin,
-    input::{Climbdown, Crane, Crouch, Jump, Mantle, Movement, RotateCamera, SwimUp, Tac},
+    input::{
+        Climbdown, Crane, Crouch, DropObject, Jump, Mantle, Movement, PullObject, RotateCamera,
+        SwimUp, Tac, ThrowObject,
+    },
     prelude::CharacterControllerCameraOf,
 };
 use bevy_enhanced_input::prelude::*;
@@ -128,7 +131,7 @@ fn setup(
         MeshMaterial3d(materials.add(Color::srgb(0.25, 0.55, 0.48))),
         Transform::from_xyz(0.0, 1.5, -7.0),
         AhoyBox3dBody::KINEMATIC,
-        AhoyBox3dCollider::cuboid(Vec3::new(1.5, 0.15, 1.5)),
+        AhoyBox3dCollider::cuboid_from_size(Vec3::new(3.0, 0.3, 3.0)),
         AhoyBox3dVelocity::linear(Vec3::X * 1.5),
         MovingPlatform {
             left: -3.0,
@@ -150,6 +153,12 @@ fn setup(
         .spawn((
             Transform::from_xyz(0.0, 2.0, 6.0),
             Box3dCharacterController::default(),
+            Box3dPickupActor {
+                preferred_distance: 1.1,
+                max_distance: 3.5,
+                throw_speed: 14.0,
+                ..default()
+            },
             PlayerInput,
             actions!(PlayerInput[
                 (
@@ -187,6 +196,24 @@ fn setup(
                 (
                     Action::<Crouch>::new(),
                     bindings![KeyCode::ControlLeft, GamepadButton::LeftTrigger2],
+                ),
+                (
+                    Action::<PullObject>::new(),
+                    ActionSettings { consume_input: true, ..default() },
+                    bevy_enhanced_input::prelude::Press::default(),
+                    bindings![MouseButton::Right],
+                ),
+                (
+                    Action::<DropObject>::new(),
+                    ActionSettings { consume_input: true, ..default() },
+                    bevy_enhanced_input::prelude::Press::default(),
+                    bindings![MouseButton::Right],
+                ),
+                (
+                    Action::<ThrowObject>::new(),
+                    ActionSettings { consume_input: true, ..default() },
+                    bevy_enhanced_input::prelude::Press::default(),
+                    bindings![MouseButton::Left],
                 ),
                 (
                     Action::<RotateCamera>::new(),
@@ -246,8 +273,7 @@ fn spawn_box_with_friction(
     color: Color,
     friction: f32,
 ) {
-    let mut collider = AhoyBox3dCollider::cuboid(size * 0.5);
-    collider.friction = friction;
+    let collider = AhoyBox3dCollider::cuboid_from_size(size).with_friction(friction);
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::from_size(size))),
         MeshMaterial3d(materials.add(color)),
@@ -274,7 +300,7 @@ fn spawn_dynamic_box(
             angular_damping: 0.4,
             ..AhoyBox3dBody::DYNAMIC
         },
-        AhoyBox3dCollider::cuboid(size * 0.5),
+        AhoyBox3dCollider::cuboid_from_size(size),
     ));
 }
 

@@ -25,17 +25,17 @@ pub mod prelude {
         water::{Water, WaterLevel, WaterState},
     };
 
+    #[cfg(any(feature = "pickup", feature = "box3d"))]
+    pub use crate::input::{DropObject, PullObject, ThrowObject};
+
     #[cfg(feature = "pickup")]
-    pub use crate::{
-        PickupConfig,
-        input::{DropObject, PullObject, ThrowObject},
-        pickup,
-    };
+    pub use crate::{PickupConfig, pickup};
 
     #[cfg(feature = "box3d")]
     pub use crate::box3d::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
-        AhoyBox3dVelocity, Box3dBodyType, Box3dColliderShape, Box3dRuntime, Box3dWater,
+        AhoyBox3dVelocity, Box3dBodyType, Box3dColliderShape, Box3dHolding, Box3dPickupActor,
+        Box3dRuntime, Box3dWater,
     };
 }
 

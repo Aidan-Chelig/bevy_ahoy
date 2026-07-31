@@ -4,6 +4,8 @@ use bevy_ecs::entity::MapEntities;
 use bevy_time::Stopwatch;
 
 use crate::CharacterControllerState;
+#[cfg(feature = "box3d")]
+use crate::box3d::{Box3dPickupAction, Box3dPickupInput};
 use crate::kcc::{forward, right};
 use crate::prelude::*;
 
@@ -30,7 +32,7 @@ impl Plugin for AhoyInputPlugin {
             )
             .add_systems(PreUpdate, tick_timers.in_set(EnhancedInputSystems::Update));
 
-        #[cfg(feature = "pickup")]
+        #[cfg(any(feature = "pickup", feature = "box3d"))]
         app.add_observer(apply_drop)
             .add_observer(apply_pull)
             .add_observer(apply_throw);
@@ -81,17 +83,17 @@ pub struct RotateCamera;
 #[action_output(f32)]
 pub struct YankCamera;
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 #[derive(Debug, InputAction)]
 #[action_output(bool)]
 pub struct PullObject;
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 #[derive(Debug, InputAction)]
 #[action_output(bool)]
 pub struct DropObject;
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 #[derive(Debug, InputAction)]
 #[action_output(bool)]
 pub struct ThrowObject;
@@ -185,55 +187,73 @@ fn apply_climbdown(
     }
 }
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 fn apply_pull(
     crouch: On<Fire<PullObject>>,
-    mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
     cams: Query<&CharacterControllerCamera>,
 ) {
-    let actor = if let Ok(camera) = cams.get(crouch.context) {
-        camera.get()
-    } else {
-        crouch.context
-    };
+    let actor = pickup_actor(crouch.context, &cams);
+    #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Pull,
         actor,
     });
+    #[cfg(feature = "box3d")]
+    box3d_pickup_input_writer.write(Box3dPickupInput {
+        action: Box3dPickupAction::Pull,
+        actor,
+    });
 }
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 fn apply_drop(
     crouch: On<Fire<DropObject>>,
-    mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
     cams: Query<&CharacterControllerCamera>,
 ) {
-    let actor = if let Ok(camera) = cams.get(crouch.context) {
-        camera.get()
-    } else {
-        crouch.context
-    };
+    let actor = pickup_actor(crouch.context, &cams);
+    #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Drop,
         actor,
     });
+    #[cfg(feature = "box3d")]
+    box3d_pickup_input_writer.write(Box3dPickupInput {
+        action: Box3dPickupAction::Drop,
+        actor,
+    });
 }
 
-#[cfg(feature = "pickup")]
+#[cfg(any(feature = "pickup", feature = "box3d"))]
 fn apply_throw(
     crouch: On<Fire<ThrowObject>>,
-    mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
+    #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
     cams: Query<&CharacterControllerCamera>,
 ) {
-    let actor = if let Ok(camera) = cams.get(crouch.context) {
-        camera.get()
-    } else {
-        crouch.context
-    };
+    let actor = pickup_actor(crouch.context, &cams);
+    #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Throw,
         actor,
     });
+    #[cfg(feature = "box3d")]
+    box3d_pickup_input_writer.write(Box3dPickupInput {
+        action: Box3dPickupAction::Throw,
+        actor,
+    });
+}
+
+#[cfg(any(feature = "pickup", feature = "box3d"))]
+fn pickup_actor(context: Entity, cams: &Query<&CharacterControllerCamera>) -> Entity {
+    if let Ok(camera) = cams.get(context) {
+        camera.get()
+    } else {
+        context
+    }
 }
 
 fn clear_accumulated_input(mut accumulated_inputs: Query<&mut AccumulatedInput>) {
