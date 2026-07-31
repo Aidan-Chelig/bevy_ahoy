@@ -487,10 +487,13 @@ impl Box3dRuntime {
     }
 
     fn shapes_for_body(&self, body_entity: Entity) -> Vec<Entity> {
-        self.shape_bodies
+        let mut shapes: Vec<_> = self
+            .shape_bodies
             .iter()
             .filter_map(|(shape_entity, owner)| (*owner == body_entity).then_some(*shape_entity))
-            .collect()
+            .collect();
+        shapes.sort_by_key(|entity| entity.to_bits());
+        shapes
     }
 }
 
@@ -508,7 +511,9 @@ fn cleanup_box3d_shapes(
     mut runtime: NonSendMut<Box3dRuntime>,
     mut removed_shapes: RemovedComponents<AhoyBox3dShape>,
 ) {
-    for entity in removed_shapes.read() {
+    let mut removed: Vec<_> = removed_shapes.read().collect();
+    removed.sort_by_key(|entity| entity.to_bits());
+    for entity in removed {
         runtime.remove_shape(entity, true);
     }
 }
@@ -517,7 +522,9 @@ fn cleanup_box3d_bodies(
     mut runtime: NonSendMut<Box3dRuntime>,
     mut removed_bodies: RemovedComponents<AhoyBox3dNativeBody>,
 ) {
-    for entity in removed_bodies.read() {
+    let mut removed: Vec<_> = removed_bodies.read().collect();
+    removed.sort_by_key(|entity| entity.to_bits());
+    for entity in removed {
         runtime.remove_body(entity);
     }
 }
@@ -536,7 +543,9 @@ fn create_box3d_bodies(
         Without<AhoyBox3dNativeBody>,
     >,
 ) {
-    for (entity, body, transform, velocity) in &bodies {
+    let mut bodies: Vec<_> = bodies.iter().collect();
+    bodies.sort_by_key(|(entity, ..)| entity.to_bits());
+    for (entity, body, transform, velocity) in bodies {
         let transform = transform.copied().unwrap_or_default();
         let native_body = runtime.world.create_body(box3d::BodyDef {
             body_type: body.body_type.into(),
@@ -569,7 +578,9 @@ fn create_box3d_shapes(
     mut runtime: NonSendMut<Box3dRuntime>,
     colliders: Query<(Entity, &AhoyBox3dCollider, &AhoyBox3dNativeBody), Without<AhoyBox3dShape>>,
 ) {
-    for (entity, collider, body) in &colliders {
+    let mut colliders: Vec<_> = colliders.iter().collect();
+    colliders.sort_by_key(|(entity, ..)| entity.to_bits());
+    for (entity, collider, body) in colliders {
         let mut def = box3d::ShapeDef::default();
         def.density = collider.density;
         def.friction = collider.friction;
@@ -880,9 +891,14 @@ fn spin_box3d_character_look(
 
 fn apply_box3d_kcc_impulses(
     runtime: NonSend<Box3dRuntime>,
-    characters: Query<(&Box3dCharacterController, &CharacterControllerOutput)>,
+    characters: Query<(
+        Entity,
+        &Box3dCharacterController,
+        &CharacterControllerOutput,
+    )>,
 ) {
-    for (cfg, output) in &characters {
+    let mut impulses = Vec::new();
+    for (character_entity, cfg, output) in &characters {
         let mut pushed_bodies = HashSet::new();
         for touch in &output.touching_entities {
             let Some(body_entity) = runtime.shape_bodies.get(&touch.entity).copied() else {
@@ -909,7 +925,18 @@ fn apply_box3d_kcc_impulses(
                 continue;
             }
 
-            body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(touch.point), true);
+            impulses.push((body_entity, character_entity, touch.point, impulse));
+        }
+    }
+    impulses.sort_by_key(|(body_entity, character_entity, ..)| {
+        (body_entity.to_bits(), character_entity.to_bits())
+    });
+    for (body_entity, _, point, impulse) in impulses {
+        let Some(body) = runtime.body(body_entity) else {
+            continue;
+        };
+        if body.is_valid() {
+            body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(point), true);
         }
     }
 }
