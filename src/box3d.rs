@@ -1427,12 +1427,16 @@ fn box3d_move_and_slide(
 }
 
 fn clip_box3d_kcc_vector(mut vector: Vec3, planes: &[box3d::CollisionPlane]) -> Vec3 {
+    let original_y = vector.y;
     for plane in planes {
         let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
         let into = vector.dot(normal);
         if into < 0.0 {
             vector -= normal * into;
         }
+    }
+    if original_y <= 0.0 && vector.y < original_y {
+        vector.y = original_y;
     }
     vector
 }
@@ -2249,6 +2253,62 @@ mod tests {
         let feet_y = transform.translation.y - cfg.height * 0.5;
         assert!(feet_y >= -0.0001, "{transform:?}");
         assert!(state.velocity.y <= 0.0001, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn downward_overhang_plane_does_not_add_downward_velocity() {
+        let planes = [box3d::CollisionPlane::rigid(box3d::Plane {
+            normal: box3d::Vec3::new(-0.70710677, -0.70710677, 0.0),
+            offset: 0.0,
+        })];
+
+        let clipped = clip_box3d_kcc_vector(Vec3::X, &planes);
+
+        assert!(clipped.x >= -0.0001, "{clipped:?}");
+        assert!(clipped.y >= -0.0001, "{clipped:?}");
+    }
+
+    #[test]
+    fn head_height_platform_contact_does_not_inject_downward_motion() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let platform = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(1.35, 0.82, 0.0)));
+        let _platform_shape = platform.create_box(
+            box3d::Vec3::new(0.25, 0.82, 2.0),
+            box3d::ShapeDef::default(),
+        );
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::X * 4.0,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::X * 0.8,
+        );
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        let feet_y = transform.translation.y - cfg.height * 0.5;
+        assert!(feet_y >= -0.0001, "{transform:?}");
+        assert!(state.velocity.y >= -0.0001, "{:?}", state.velocity);
+        assert!(state.grounded.is_some(), "{state:?}");
     }
 
     #[test]
