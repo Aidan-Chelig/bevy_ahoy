@@ -2395,7 +2395,11 @@ fn box3d_character_intersects(
         points,
         cfg.radius,
         box3d::QueryFilter::default(),
-        |_, _| {
+        |_, plane| {
+            let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
+            if normal.y >= cfg.min_walk_cos {
+                return true;
+            }
             intersects = true;
             false
         },
@@ -2656,6 +2660,83 @@ mod tests {
 
         assert!(box3d_character_intersects(&runtime, &cfg, origin, false));
         assert!(!box3d_character_intersects(&runtime, &cfg, origin, true));
+    }
+
+    #[test]
+    fn standing_probe_ignores_tiny_floor_overlap() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let origin = Vec3::Y * (cfg.height * 0.5 - cfg.skin_width);
+
+        assert!(!box3d_character_intersects(&runtime, &cfg, origin, false));
+    }
+
+    #[test]
+    fn crouch_release_stands_after_leaving_low_space() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(-1.0, 1.55, 0.0)));
+        let _ceiling_shape =
+            ceiling.create_box(box3d::Vec3::new(1.0, 0.1, 1.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let input = AccumulatedInput::default();
+        let mut transform = Transform::from_xyz(-1.0, cfg.height * 0.5, 0.0);
+
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+        assert!(state.crouching);
+
+        transform.translation.x = 1.0;
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+        assert!(!state.crouching);
+    }
+
+    #[test]
+    fn crouch_release_stands_after_leaving_sloped_low_space() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::ZERO));
+        let _ceiling_shape = ceiling.id().create_transformed_box(
+            box3d::Vec3::new(1.1, 0.08, 1.0),
+            box3d::Transform {
+                p: box3d::Vec3::new(-1.0, 1.58, 0.0),
+                q: to_box3d_quat(Quat::from_rotation_z(18.0_f32.to_radians())),
+            },
+            box3d::ShapeDef::default(),
+        );
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let input = AccumulatedInput::default();
+        let mut transform = Transform::from_xyz(-1.0, cfg.height * 0.5, 0.0);
+
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+        assert!(state.crouching);
+
+        transform.translation.x = 1.0;
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+        assert!(!state.crouching);
     }
 
     #[test]
