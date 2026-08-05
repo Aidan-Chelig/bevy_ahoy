@@ -23,12 +23,10 @@ fn main() -> AppExit {
             AhoyFixedUpdateUtilsPlugin,
             AhoyInputPlugin,
             AhoyCameraPlugin,
-            AhoyBox3dPlugin {
-                config: AhoyBox3dConfig {
-                    gravity: Vec3::new(0.0, -9.8, 0.0),
-                    sub_steps: 8,
-                },
-            },
+            AhoyBox3dPlugin::with_config(AhoyBox3dConfig {
+                gravity: Vec3::new(0.0, -9.8, 0.0),
+                sub_steps: 8,
+            }),
         ))
         .add_input_context::<PlayerInput>()
         .add_systems(Startup, setup)

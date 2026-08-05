@@ -11,7 +11,9 @@
 
 use bevy_app::{FixedUpdate, Plugin, PostUpdate};
 use bevy_ecs::{
+    intern::Interned,
     prelude::*,
+    schedule::ScheduleLabel,
     system::{NonSend, NonSendMut},
 };
 use bevy_math::{Dir3, Quat, Vec3, Vec3Swizzles};
@@ -37,7 +39,7 @@ const MAX_BOX3D_CLIP_PASSES: usize = 32;
 pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
-        AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
+        AhoyBox3dSystems, AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
         Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dMantleState,
         Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime, Box3dWater,
         bevy_box3d::{
@@ -57,12 +59,32 @@ pub mod prelude {
 #[derive(Clone, Copy, Debug)]
 pub struct AhoyBox3dPlugin {
     pub config: AhoyBox3dConfig,
+    pub schedule: Interned<dyn ScheduleLabel>,
 }
 
 impl Default for AhoyBox3dPlugin {
     fn default() -> Self {
         Self {
             config: AhoyBox3dConfig::default(),
+            schedule: FixedUpdate.intern(),
+        }
+    }
+}
+
+impl AhoyBox3dPlugin {
+    /// Create a Box3D runtime plugin that ticks in the given schedule.
+    pub fn new(schedule: impl ScheduleLabel) -> Self {
+        Self {
+            schedule: schedule.intern(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Box3D runtime plugin with custom config in [`FixedUpdate`].
+    pub fn with_config(config: AhoyBox3dConfig) -> Self {
+        Self {
+            config,
+            ..Default::default()
         }
     }
 }
@@ -72,8 +94,9 @@ impl Plugin for AhoyBox3dPlugin {
         app.add_message::<Box3dPickupInput>()
             .insert_resource(self.config)
             .insert_non_send_resource(Box3dRuntime::new(self.config))
+            .configure_sets(self.schedule, AhoyBox3dSystems::Tick)
             .add_systems(
-                FixedUpdate,
+                self.schedule,
                 (
                     cleanup_box3d_shapes,
                     cleanup_box3d_bodies,
@@ -88,10 +111,16 @@ impl Plugin for AhoyBox3dPlugin {
                     spin_box3d_character_look,
                     apply_box3d_kcc_impulses,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(AhoyBox3dSystems::Tick),
             )
             .add_systems(PostUpdate, writeback_box3d_transforms);
     }
+}
+
+#[derive(SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum AhoyBox3dSystems {
+    Tick,
 }
 
 /// Settings for Ahoy's lightweight Box3D runtime.

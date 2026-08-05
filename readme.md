@@ -224,6 +224,22 @@ inputs, dynamic props, and Box3D pickup, run:
 nix develop --command cargo run --example box3d_runtime --no-default-features --features box3d
 ```
 
+By default, `AhoyBox3dPlugin::default()` runs Box3D in `FixedUpdate`. You can
+override this when physics needs to run inside another schedule, such as
+`bevy_ggrs::GgrsSchedule`:
+
+```rust
+use bevy_ahoy::box3d::prelude::*;
+
+app.add_plugins(AhoyBox3dPlugin::new(bevy_ggrs::GgrsSchedule));
+```
+
+Use `AhoyBox3dPlugin::with_config(config)` for custom Box3D settings in
+`FixedUpdate`, or construct `AhoyBox3dPlugin { config, schedule }` directly if
+you need both a custom schedule and custom config. The chained Box3D tick
+systems are registered in `AhoyBox3dSystems::Tick`, so multiplayer code can
+order rollback-safe systems around the physics/controller tick.
+
 The Box3D backend is not a strict drop-in replacement for the Avian backend.
 Core movement tuning is intentionally kept close to the Avian controller, but
 colliders are explicit `AhoyBox3dCollider` components and pickup uses
