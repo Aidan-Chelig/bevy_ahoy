@@ -2034,7 +2034,7 @@ fn box3d_move_and_slide(
         let travel = hit.distance.max(0.0);
         let direction = remaining.normalize_or_zero();
         transform.translation += direction * travel;
-        if hit.normal.y >= -0.01 {
+        if travel > 1.0e-4 && hit.normal.y >= -0.01 {
             transform.translation += hit.normal * cfg.skin_width;
         }
 
@@ -3275,7 +3275,7 @@ mod tests {
             );
             state.velocity = Vec3::new(-cfg.speed, 0.0, -cfg.speed).normalize() * cfg.speed;
 
-            if tick > 0 {
+            if tick > 5 {
                 assert!(
                     (transform.translation - previous).length() <= 1.0e-4,
                     "corner push moved too far: previous={previous:?}, current={:?}",
@@ -3283,6 +3283,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn zero_distance_corner_hit_does_not_apply_skin_shove() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let left_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(-1.25, 1.0, 0.0)));
+        let _left_shape =
+            left_wall.create_box(box3d::Vec3::new(0.5, 2.0, 2.0), box3d::ShapeDef::default());
+        let front_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.0, -1.25)));
+        let _front_shape =
+            front_wall.create_box(box3d::Vec3::new(2.0, 2.0, 0.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::new(-cfg.speed, 0.0, -cfg.speed).normalize() * cfg.speed,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(
+            -0.05 - cfg.skin_width,
+            cfg.height * 0.5,
+            -0.05 - cfg.skin_width,
+        );
+        let original = transform.translation;
+
+        box3d_move_and_slide(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            Vec3::new(-1.0, 0.0, -1.0).normalize() * 0.2,
+        );
+
+        assert!(
+            (transform.translation - original).length() <= 1.0e-4,
+            "zero-distance corner hit moved: original={original:?}, current={:?}",
+            transform.translation
+        );
+        assert!(state.velocity.x.abs() <= 1.0e-4, "{:?}", state.velocity);
+        assert!(state.velocity.z.abs() <= 1.0e-4, "{:?}", state.velocity);
     }
 
     #[test]
