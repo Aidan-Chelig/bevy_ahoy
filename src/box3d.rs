@@ -31,6 +31,7 @@ pub use ::bevy_box3d;
 pub use ::box3d;
 
 const MAX_BOX3D_DEPENETRATION_PLANES: usize = 8;
+const MAX_BOX3D_CLIP_PASSES: usize = 32;
 
 /// Common Box3D imports for users experimenting with the `box3d` feature.
 pub mod prelude {
@@ -2028,15 +2029,24 @@ fn box3d_move_and_slide(
 
 fn clip_box3d_kcc_vector(mut vector: Vec3, planes: &[box3d::CollisionPlane]) -> Vec3 {
     let original_y = vector.y;
-    for plane in planes {
-        let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
-        let into = vector.dot(normal);
-        if into < 0.0 {
-            vector -= normal * into;
+    for _ in 0..MAX_BOX3D_CLIP_PASSES {
+        let before = vector;
+        for plane in planes {
+            let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
+            let into = vector.dot(normal);
+            if into < 0.0 {
+                vector -= normal * into;
+            }
+        }
+        if vector.distance_squared(before) <= 1.0e-10 {
+            break;
         }
     }
     if original_y <= 0.0 && vector.y < original_y {
         vector.y = original_y;
+    }
+    if vector.length_squared() <= 1.0e-10 {
+        vector = Vec3::ZERO;
     }
     vector
 }
@@ -3121,6 +3131,105 @@ mod tests {
     }
 
     #[test]
+    fn sustained_corner_push_does_not_jitter_position() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let left_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(-1.25, 1.0, 0.0)));
+        let _left_shape =
+            left_wall.create_box(box3d::Vec3::new(0.5, 2.0, 2.0), box3d::ShapeDef::default());
+        let front_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.0, -1.25)));
+        let _front_shape =
+            front_wall.create_box(box3d::Vec3::new(2.0, 2.0, 0.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::new(-cfg.speed, 0.0, -cfg.speed).normalize() * cfg.speed,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+        for tick in 0..8 {
+            let previous = transform.translation;
+            box3d_move_and_slide(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                Vec3::new(-1.0, 0.0, -1.0).normalize() * 0.2,
+            );
+            state.velocity = Vec3::new(-cfg.speed, 0.0, -cfg.speed).normalize() * cfg.speed;
+
+            if tick > 0 {
+                assert!(
+                    (transform.translation - previous).length() <= 1.0e-4,
+                    "corner push moved too far: previous={previous:?}, current={:?}",
+                    transform.translation
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grounded_corner_push_does_not_jitter_position() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+        let left_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(-1.25, 1.0, 0.0)));
+        let _left_shape =
+            left_wall.create_box(box3d::Vec3::new(0.5, 2.0, 2.0), box3d::ShapeDef::default());
+        let front_wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.0, -1.25)));
+        let _front_shape =
+            front_wall.create_box(box3d::Vec3::new(2.0, 2.0, 0.5), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let delta = 1.0 / 60.0;
+        let wish_velocity = Vec3::new(-1.0, 0.0, -1.0).normalize() * cfg.speed;
+        let mut state = Box3dCharacterControllerState::default();
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+
+        for tick in 0..16 {
+            let previous = transform.translation;
+            apply_box3d_friction(&runtime, &cfg, &mut state, delta);
+            ground_accelerate(&cfg, &mut state, wish_velocity, delta);
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+            update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+
+            if tick > 2 {
+                assert!(
+                    (transform.translation - previous).length() <= 1.0e-4,
+                    "corner push moved too far: previous={previous:?}, current={:?}, velocity={:?}",
+                    transform.translation,
+                    state.velocity
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ceiling_hit_does_not_push_character_through_floor() {
         let runtime = Box3dRuntime::new(AhoyBox3dConfig {
             gravity: Vec3::ZERO,
@@ -3208,6 +3317,26 @@ mod tests {
 
         assert!(clipped.x >= -0.0001, "{clipped:?}");
         assert!(clipped.y >= -0.0001, "{clipped:?}");
+    }
+
+    #[test]
+    fn clipping_oblique_corner_does_not_reenter_previous_plane() {
+        let planes = [
+            box3d::CollisionPlane::rigid(box3d::Plane {
+                normal: box3d::Vec3::new(1.0, 0.0, 0.0),
+                offset: 0.0,
+            }),
+            box3d::CollisionPlane::rigid(box3d::Plane {
+                normal: box3d::Vec3::new(-0.70710677, 0.0, 0.70710677),
+                offset: 0.0,
+            }),
+        ];
+        let clipped = clip_box3d_kcc_vector(Vec3::new(-1.0, 0.0, -1.0), &planes);
+
+        for plane in planes {
+            let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
+            assert!(clipped.dot(normal) >= -1.0e-4, "{clipped:?}");
+        }
     }
 
     #[test]
