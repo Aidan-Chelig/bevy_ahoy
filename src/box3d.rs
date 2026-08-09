@@ -591,6 +591,71 @@ impl Box3dRuntime {
         self.shape_entities.get(&shape.to_bits()).copied()
     }
 
+    pub fn body_entity_for_shape(&self, shape: box3d::ShapeId) -> Option<Entity> {
+        let shape_entity = self.shape_entity(shape)?;
+        self.body_entity_for_shape_entity(shape_entity)
+    }
+
+    pub fn body_entity_for_shape_entity(&self, shape_entity: Entity) -> Option<Entity> {
+        self.shape_bodies.get(&shape_entity).copied()
+    }
+
+    /// Registers a native Box3D body created by an external integration.
+    ///
+    /// The caller remains responsible for destroying the native body and should
+    /// call [`Self::unregister_body_id`] before doing so.
+    pub fn register_body_id(&mut self, entity: Entity, body: box3d::BodyId) {
+        self.bodies.insert(entity, body);
+        self.body_entities.insert(body.to_bits(), entity);
+    }
+
+    /// Removes an externally-created native body from Ahoy's lookup tables.
+    pub fn unregister_body_id(&mut self, entity: Entity, body: box3d::BodyId) {
+        if self.bodies.get(&entity) == Some(&body) {
+            self.bodies.remove(&entity);
+        }
+        if self.body_entities.get(&body.to_bits()) == Some(&entity) {
+            self.body_entities.remove(&body.to_bits());
+        }
+        let shape_entities: HashSet<_> = self
+            .shape_bodies
+            .iter()
+            .filter_map(|(shape_entity, owner)| (*owner == entity).then_some(*shape_entity))
+            .collect();
+        self.shape_entities
+            .retain(|_, shape_entity| !shape_entities.contains(shape_entity));
+        self.shape_bodies.retain(|_, owner| *owner != entity);
+    }
+
+    /// Registers a native Box3D shape created by an external integration.
+    ///
+    /// `shape_entity` is the ECS entity that should be reported by shape casts,
+    /// while `body_entity` is the owning body entity. Multiple native shapes can
+    /// map to the same pair, which supports compound colliders.
+    pub fn register_shape_id(
+        &mut self,
+        shape_entity: Entity,
+        body_entity: Entity,
+        shape: box3d::ShapeId,
+    ) {
+        self.shape_entities.insert(shape.to_bits(), shape_entity);
+        self.shape_bodies.insert(shape_entity, body_entity);
+    }
+
+    /// Removes an externally-created native shape from Ahoy's lookup tables.
+    pub fn unregister_shape_id(&mut self, shape_entity: Entity, shape: box3d::ShapeId) {
+        if self.shape_entities.get(&shape.to_bits()) == Some(&shape_entity) {
+            self.shape_entities.remove(&shape.to_bits());
+        }
+        if !self
+            .shape_entities
+            .values()
+            .any(|remaining_shape_entity| *remaining_shape_entity == shape_entity)
+        {
+            self.shape_bodies.remove(&shape_entity);
+        }
+    }
+
     fn remove_shape(&mut self, entity: Entity, destroy: bool) {
         if let Some(shape) = self.shapes.remove(&entity) {
             self.shape_entities.remove(&shape.to_bits());
@@ -870,10 +935,7 @@ fn find_box3d_pickup_body(
         to_box3d_vec3(box3d_pickup_forward(look) * actor.max_distance.max(0.0)),
         actor.prop_filter,
         |hit| {
-            let Some(shape_entity) = runtime.shape_entity(hit.shape.id()) else {
-                return 1.0;
-            };
-            let Some(body_entity) = runtime.shape_bodies.get(&shape_entity).copied() else {
+            let Some(body_entity) = runtime.body_entity_for_shape(hit.shape.id()) else {
                 return 1.0;
             };
             let Some(body) = runtime.body(body_entity) else {
@@ -1166,7 +1228,7 @@ fn apply_box3d_kcc_impulses(
     for (character_entity, cfg, output) in &characters {
         let mut pushed_bodies = HashSet::new();
         for touch in &output.touching_entities {
-            let Some(body_entity) = runtime.shape_bodies.get(&touch.entity).copied() else {
+            let Some(body_entity) = runtime.body_entity_for_shape_entity(touch.entity) else {
                 continue;
             };
             if !pushed_bodies.insert(body_entity) {
@@ -2339,7 +2401,7 @@ fn update_box3d_platform_velocity(
         state.platform_angular_velocity = Vec3::ZERO;
         return;
     };
-    let Some(body_entity) = runtime.shape_bodies.get(&collider_entity).copied() else {
+    let Some(body_entity) = runtime.body_entity_for_shape_entity(collider_entity) else {
         state.platform_velocity = Vec3::ZERO;
         state.platform_angular_velocity = Vec3::ZERO;
         return;
@@ -2558,10 +2620,7 @@ fn box3d_state_holds_shape(
     let Some(held_body) = state.held_body else {
         return false;
     };
-    let Some(shape_entity) = runtime.shape_entity(shape) else {
-        return false;
-    };
-    runtime.shape_bodies.get(&shape_entity) == Some(&held_body)
+    runtime.body_entity_for_shape(shape) == Some(held_body)
 }
 
 fn cast_box3d_sphere(
@@ -3815,6 +3874,59 @@ mod tests {
         let separating =
             calculate_box3d_linear_push_impulse(0.5, 80.0, Vec3::X * 12.0, Vec3::X, Vec3::ZERO);
         assert_eq!(separating, Vec3::ZERO);
+    }
+
+    #[test]
+    fn external_compound_shapes_map_to_body_entity() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig::default());
+        let body_entity = Entity::from_bits(7);
+        let body = runtime
+            .world()
+            .create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::ZERO));
+        let body_id = body.id();
+        let first = body
+            .create_box(box3d::Vec3::new(0.5, 0.5, 0.5), box3d::ShapeDef::default())
+            .id();
+        let second = body
+            .create_box(
+                box3d::Vec3::new(0.25, 0.25, 0.25),
+                box3d::ShapeDef::default(),
+            )
+            .id();
+        std::mem::forget(body);
+
+        runtime.register_body_id(body_entity, body_id);
+        runtime.register_shape_id(body_entity, body_entity, first);
+        runtime.register_shape_id(body_entity, body_entity, second);
+
+        assert_eq!(runtime.body_entity(body_id), Some(body_entity));
+        assert_eq!(runtime.shape_entity(first), Some(body_entity));
+        assert_eq!(runtime.shape_entity(second), Some(body_entity));
+        assert_eq!(runtime.body_entity_for_shape(first), Some(body_entity));
+        assert_eq!(runtime.body_entity_for_shape(second), Some(body_entity));
+        assert_eq!(
+            runtime.body_entity_for_shape_entity(body_entity),
+            Some(body_entity)
+        );
+
+        runtime.unregister_shape_id(body_entity, first);
+        assert_eq!(runtime.body_entity_for_shape(first), None);
+        assert_eq!(runtime.body_entity_for_shape(second), Some(body_entity));
+        assert_eq!(
+            runtime.body_entity_for_shape_entity(body_entity),
+            Some(body_entity)
+        );
+
+        runtime.unregister_shape_id(body_entity, second);
+        assert_eq!(runtime.body_entity_for_shape(second), None);
+        assert_eq!(runtime.body_entity_for_shape_entity(body_entity), None);
+        runtime.register_shape_id(body_entity, body_entity, second);
+
+        runtime.unregister_body_id(body_entity, body_id);
+        body_id.destroy();
+        assert_eq!(runtime.body_entity(body_id), None);
+        assert_eq!(runtime.shape_entity(second), None);
+        assert_eq!(runtime.body_entity_for_shape(second), None);
     }
 }
 
