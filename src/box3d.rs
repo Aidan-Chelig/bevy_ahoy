@@ -1318,7 +1318,7 @@ fn box3d_ground_move(
     let mut movement = state.velocity * delta;
     movement.y = 0.0;
 
-    if movement.length_squared() < 0.0001 {
+    if movement.length_squared() <= f32::EPSILON {
         state.velocity -= state.platform_velocity;
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
@@ -2801,6 +2801,56 @@ mod tests {
 
         assert_eq!(crouching[0], crouching[1]);
         assert_eq!(crouching[0].y - cfg.radius, -cfg.height * 0.5);
+    }
+
+    #[test]
+    fn crouched_character_moves_on_flat_ground() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.5, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(5.0, 0.5, 5.0), box3d::ShapeDef::default());
+
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            ..Default::default()
+        };
+        let delta = 1.0 / 60.0;
+        let wish_velocity = Vec3::NEG_Z * cfg.speed * cfg.crouch_speed_scale;
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+        assert!(state.grounded.is_some());
+
+        for _ in 0..8 {
+            apply_box3d_friction(&runtime, &cfg, &mut state, delta);
+            ground_accelerate(&cfg, &mut state, wish_velocity, delta);
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+            update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+        }
+
+        assert!(
+            transform.translation.z < -0.01,
+            "crouched character did not move: transform={:?}, velocity={:?}",
+            transform.translation,
+            state.velocity
+        );
     }
 
     #[test]
