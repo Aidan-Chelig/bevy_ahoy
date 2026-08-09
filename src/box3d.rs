@@ -52,6 +52,8 @@ pub mod prelude {
             BodyDef, BodyId, BodyType, CollisionPlane, Filter, MoverCapsule, QueryFilter, ShapeDef,
             ShapeId, ShapeProxy, SurfaceMaterial, World, clip_vector, solve_planes,
         },
+        box3d_character_points, calculate_box3d_linear_push_impulse, calculate_box3d_push_impulse,
+        calculate_box3d_push_velocity,
     };
 }
 
@@ -1204,7 +1206,11 @@ fn apply_box3d_kcc_impulses(
     }
 }
 
-fn calculate_box3d_push_impulse(
+/// Calculates a character-to-dynamic-body push impulse at a contact point.
+///
+/// This accounts for the target body's current point velocity, inverse mass,
+/// and angular response around its center of mass.
+pub fn calculate_box3d_push_impulse(
     body: box3d::BodyId,
     character_mass: f32,
     point: Vec3,
@@ -2594,7 +2600,11 @@ fn cast_box3d_sphere(
     closest
 }
 
-fn box3d_character_points(cfg: &Box3dCharacterController, crouching: bool) -> [box3d::Vec3; 2] {
+/// Returns the capsule segment points used by the Box3D character controller.
+///
+/// The points are local to the character origin and should be paired with
+/// [`Box3dCharacterController::radius`] when constructing a [`box3d::ShapeProxy`].
+pub fn box3d_character_points(cfg: &Box3dCharacterController, crouching: bool) -> [box3d::Vec3; 2] {
     let height = if crouching {
         cfg.crouch_height
     } else {
@@ -2607,6 +2617,75 @@ fn box3d_character_points(cfg: &Box3dCharacterController, crouching: bool) -> [b
         box3d::Vec3::new(0.0, center_offset - half_segment, 0.0),
         box3d::Vec3::new(0.0, center_offset + half_segment, 0.0),
     ]
+}
+
+/// Calculates the controller's intended horizontal push velocity from input.
+///
+/// This is useful for deterministic integrations that need to snapshot all
+/// physics state before applying character-to-dynamic-body impulses.
+pub fn calculate_box3d_push_velocity(
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    input: &AccumulatedInput,
+    look: &CharacterLook,
+) -> Vec3 {
+    let movement = input.last_movement.unwrap_or_default();
+    let look = look.to_quat();
+    let mut forward = look * Vec3::NEG_Z;
+    forward.y = 0.0;
+    forward = forward.normalize_or_zero();
+    let mut right = look * Vec3::X;
+    right.y = 0.0;
+    right = right.normalize_or_zero();
+
+    let wish_direction = movement.y * forward + movement.x * right;
+    let speed = if state.grounded.is_none() {
+        cfg.air_speed
+    } else if state.crouching {
+        cfg.speed * cfg.crouch_speed_scale
+    } else {
+        cfg.speed
+    };
+
+    wish_direction.normalize_or_zero() * speed
+}
+
+/// Calculates a deterministic linear push impulse without reading live body
+/// velocity from Box3D.
+///
+/// Use this when body velocity was snapshotted before resolving a deterministic
+/// batch of character pushes. For richer single-player behavior, prefer
+/// [`calculate_box3d_push_impulse`], which also accounts for angular response
+/// at the contact point.
+pub fn calculate_box3d_linear_push_impulse(
+    body_inverse_mass: f32,
+    character_mass: f32,
+    body_linear_velocity: Vec3,
+    direction: Vec3,
+    character_velocity: Vec3,
+) -> Vec3 {
+    if character_mass <= 0.0 || !character_mass.is_finite() {
+        return Vec3::ZERO;
+    }
+
+    let direction = direction.normalize_or_zero();
+    let closing_speed = direction
+        .dot(character_velocity - body_linear_velocity)
+        .max(0.0);
+    if closing_speed <= f32::EPSILON {
+        return Vec3::ZERO;
+    }
+
+    if body_inverse_mass <= 0.0 || !body_inverse_mass.is_finite() {
+        return Vec3::ZERO;
+    }
+
+    let inverse_effective_mass = character_mass.recip() + body_inverse_mass;
+    if inverse_effective_mass <= f32::EPSILON || !inverse_effective_mass.is_finite() {
+        return Vec3::ZERO;
+    }
+
+    direction * (closing_speed / inverse_effective_mass)
 }
 
 fn validate_box3d_velocity(
@@ -3724,6 +3803,17 @@ mod tests {
 
         let separating =
             calculate_box3d_push_impulse(body_id, 80.0, Vec3::ZERO, Vec3::X, Vec3::NEG_X);
+        assert_eq!(separating, Vec3::ZERO);
+    }
+
+    #[test]
+    fn linear_push_impulse_uses_snapshotted_velocity() {
+        let impulse =
+            calculate_box3d_linear_push_impulse(0.5, 80.0, Vec3::ZERO, Vec3::X, Vec3::X * 12.0);
+        assert!(impulse.x > 0.0 && impulse.x < 24.0, "{impulse:?}");
+
+        let separating =
+            calculate_box3d_linear_push_impulse(0.5, 80.0, Vec3::X * 12.0, Vec3::X, Vec3::ZERO);
         assert_eq!(separating, Vec3::ZERO);
     }
 }
