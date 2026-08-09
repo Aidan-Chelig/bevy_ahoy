@@ -2473,10 +2473,39 @@ fn handle_box3d_crouching(
     if input.crouched {
         state.crouching = true;
     } else if state.crouching
-        && !box3d_character_intersects(runtime, cfg, transform.translation, false)
+        && !box3d_standing_headroom_blocked(runtime, cfg, transform.translation)
     {
         state.crouching = false;
     }
+}
+
+fn box3d_standing_headroom_blocked(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    origin: Vec3,
+) -> bool {
+    let points = box3d_character_points(cfg, false);
+    let mut planes = Vec::new();
+    runtime.world.collide_mover(
+        to_box3d_vec3(origin),
+        points,
+        cfg.radius,
+        box3d::QueryFilter::default(),
+        |_, plane| {
+            let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
+            if normal.y >= cfg.min_walk_cos {
+                return true;
+            }
+            planes.push(box3d::CollisionPlane::rigid(plane.plane));
+            planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
+        },
+    );
+    if planes.is_empty() {
+        return false;
+    }
+
+    let offset = from_box3d_vec3(box3d::solve_planes(box3d::Vec3::ZERO, &mut planes));
+    offset.y < -cfg.skin_width
 }
 
 fn box3d_character_intersects(
@@ -2894,6 +2923,30 @@ mod tests {
         let origin = Vec3::Y * (cfg.height * 0.5 - cfg.skin_width);
 
         assert!(!box3d_character_intersects(&runtime, &cfg, origin, false));
+    }
+
+    #[test]
+    fn crouch_release_stands_beside_wall() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.7, 0.9, 0.0)));
+        let _wall_shape =
+            wall.create_box(box3d::Vec3::new(0.1, 1.0, 2.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let input = AccumulatedInput::default();
+        let transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+
+        assert!(!state.crouching);
     }
 
     #[test]
