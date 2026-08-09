@@ -1922,6 +1922,9 @@ fn prepare_box3d_water_velocity(
         input.swim_up = false;
         wish_velocity += Vec3::Y * cfg.speed;
     }
+    if input.crouched {
+        wish_velocity -= Vec3::Y * cfg.speed;
+    }
     wish_velocity = wish_velocity.clamp_length_max(cfg.speed);
     if wish_velocity == Vec3::ZERO {
         wish_velocity -= Vec3::Y * cfg.water_gravity;
@@ -2880,6 +2883,31 @@ mod tests {
             transform.translation,
             state.velocity
         );
+    }
+
+    #[test]
+    fn crouch_input_swims_downward() {
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            water_acceleration_hz: 100.0,
+            water_slowdown: 1.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            crouched: true,
+            ..Default::default()
+        };
+
+        prepare_box3d_water_velocity(
+            &cfg,
+            &mut state,
+            &mut input,
+            &CharacterLook::default(),
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y < 0.0);
     }
 
     #[test]

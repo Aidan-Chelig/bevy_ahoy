@@ -440,6 +440,9 @@ fn water_move(
         ctx.input.swim_up = false;
         wish_velocity += Vec3::Y * ctx.cfg.speed;
     };
+    if ctx.input.crouched {
+        wish_velocity -= Vec3::Y * ctx.cfg.speed;
+    }
     // Avoid Space + W + Look up to go faster than either alone
     wish_velocity = wish_velocity.clamp_length_max(ctx.cfg.speed);
     if wish_velocity == Vec3::ZERO {
