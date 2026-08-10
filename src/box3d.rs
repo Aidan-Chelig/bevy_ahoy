@@ -17,6 +17,8 @@ use bevy_ecs::{
     system::{NonSend, NonSendMut},
 };
 use bevy_math::{Dir3, Quat, Vec3, Vec3Swizzles};
+#[cfg(test)]
+use bevy_math::Vec2;
 use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
 use core::time::Duration;
@@ -40,8 +42,9 @@ pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dSystems, AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
-        Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dMantleState,
-        Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime, Box3dWater,
+        Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dLadder,
+        Box3dMantleState, Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime,
+        Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -288,6 +291,19 @@ impl Box3dWater {
             half_extents,
             speed: f32::MAX,
         }
+    }
+}
+
+/// Non-solid oriented cuboid ladder volume used by the Box3D controller.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[require(Transform)]
+pub struct Box3dLadder {
+    pub half_extents: Vec3,
+}
+
+impl Box3dLadder {
+    pub const fn cuboid(half_extents: Vec3) -> Self {
+        Self { half_extents }
     }
 }
 
@@ -995,6 +1011,7 @@ fn run_box3d_kcc(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
     waters: Query<(&Box3dWater, &Transform), Without<Box3dCharacterController>>,
+    ladders: Query<(&Box3dLadder, &Transform), Without<Box3dCharacterController>>,
     mut characters: Query<(
         &Box3dCharacterController,
         &mut Box3dCharacterControllerState,
@@ -1014,11 +1031,18 @@ fn run_box3d_kcc(
 
         handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
         update_box3d_water(cfg, &state, &transform, &waters, &mut water);
+        let on_ladder = water.level <= WaterLevel::Feet
+            && box3d_character_touches_ladder(cfg, &state, &transform, &ladders);
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
+        if on_ladder {
+            state.grounded = None;
+            state.crane_height_left = None;
+            state.mantle = None;
+        }
 
-        if water.level <= WaterLevel::Feet && state.grounded.is_none() {
+        if water.level <= WaterLevel::Feet && !on_ladder && state.grounded.is_none() {
             state.velocity.y -= cfg.gravity * 0.5 * delta;
         }
 
@@ -1077,6 +1101,26 @@ fn run_box3d_kcc(
                 wish_velocity_3d,
                 delta,
             );
+        } else if on_ladder {
+            prepare_box3d_ladder_velocity(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut input,
+                look,
+                &transform,
+                wish_velocity,
+                delta,
+            );
+            validate_box3d_velocity(cfg, &mut state);
+            box3d_ladder_move(
+                &runtime,
+                cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
         } else {
             handle_box3d_jump(
                 &runtime,
@@ -1108,6 +1152,9 @@ fn run_box3d_kcc(
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
+        if on_ladder {
+            state.grounded = None;
+        }
         if was_grounded {
             update_box3d_climbdown_state(
                 &runtime,
@@ -1119,7 +1166,7 @@ fn run_box3d_kcc(
             );
         }
 
-        finish_box3d_kcc_tick(cfg, &water, &mut state, delta);
+        finish_box3d_kcc_tick(cfg, &water, on_ladder && input.crouched, &mut state, delta);
         validate_box3d_velocity(cfg, &mut state);
     }
 }
@@ -1190,13 +1237,14 @@ fn move_box3d_character_for_state(
 fn finish_box3d_kcc_tick(
     cfg: &Box3dCharacterController,
     water: &WaterState,
+    zero_gravity: bool,
     state: &mut Box3dCharacterControllerState,
     delta: f32,
 ) {
     if state.grounded.is_some() {
         state.velocity.y = state.platform_velocity.y;
         state.last_ground.reset();
-    } else if water.level <= WaterLevel::Feet {
+    } else if water.level <= WaterLevel::Feet && !zero_gravity {
         state.velocity.y -= cfg.gravity * 0.5 * delta;
     }
 }
@@ -1948,6 +1996,83 @@ fn box3d_water_move(
     state.velocity -= state.platform_velocity;
 }
 
+fn prepare_box3d_ladder_velocity(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    look: &CharacterLook,
+    transform: &Transform,
+    wish_velocity: Vec3,
+    delta: f32,
+) {
+    let movement = input.last_movement.unwrap_or_default();
+    let mut ladder_velocity = Vec3::ZERO;
+    let mut horizontal = wish_velocity;
+    horizontal.y = 0.0;
+
+    if movement.y > f32::EPSILON {
+        let forward = kcc::forward(look.to_quat());
+        if forward.y < -cfg.climb_reverse_sin {
+            ladder_velocity -= Vec3::Y * cfg.speed;
+        } else if box3d_ladder_pushes_into_adjacent_collider(
+            runtime,
+            cfg,
+            state,
+            transform,
+            horizontal,
+        ) {
+            ladder_velocity += Vec3::Y * cfg.speed;
+            horizontal = Vec3::ZERO;
+        }
+    } else if movement.y < -f32::EPSILON {
+        ladder_velocity -= Vec3::Y * cfg.speed;
+    }
+
+    if input.swim_up {
+        input.swim_up = false;
+        ladder_velocity += Vec3::Y * cfg.speed;
+    }
+    if horizontal.length_squared() > f32::EPSILON {
+        ladder_velocity += horizontal.clamp_length_max(cfg.speed);
+    }
+    ladder_velocity = ladder_velocity.clamp_length_max(cfg.speed);
+
+    state.velocity = state.velocity.lerp(
+        ladder_velocity,
+        (cfg.water_acceleration_hz * delta).clamp(0.0, 1.0),
+    );
+}
+
+fn box3d_ladder_pushes_into_adjacent_collider(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    transform: &Transform,
+    horizontal_wish_velocity: Vec3,
+) -> bool {
+    let direction = horizontal_wish_velocity.normalize_or_zero();
+    if direction.length_squared() <= f32::EPSILON {
+        return false;
+    }
+
+    let probe_distance = cfg.skin_width + cfg.radius * 0.25;
+    cast_box3d_character(runtime, cfg, state, transform.translation, direction * probe_distance)
+        .is_some_and(|hit| hit.normal.y.abs() < cfg.min_walk_cos && direction.dot(-hit.normal) > 0.5)
+}
+
+fn box3d_ladder_move(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    output: &mut CharacterControllerOutput,
+    transform: &mut Transform,
+    delta: f32,
+) {
+    let movement = state.velocity * delta;
+    box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
+}
+
 fn water_accelerate(
     cfg: &Box3dCharacterController,
     state: &mut Box3dCharacterControllerState,
@@ -2464,6 +2589,45 @@ fn update_box3d_water(
 fn box3d_water_contains(water: &Box3dWater, transform: &Transform, point: Vec3) -> bool {
     let local_point = transform.compute_affine().inverse().transform_point3(point);
     local_point.abs().cmple(water.half_extents).all()
+}
+
+fn box3d_character_touches_ladder(
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    transform: &Transform,
+    ladders: &Query<(&Box3dLadder, &Transform), Without<Box3dCharacterController>>,
+) -> bool {
+    let feet = transform.translation + Vec3::NEG_Y * (cfg.height * 0.5 - cfg.ground_distance);
+    let active_height = if state.crouching {
+        cfg.crouch_height.max(cfg.radius * 2.0)
+    } else {
+        cfg.height
+    };
+    let waist = feet + Vec3::Y * active_height * 0.5;
+    let eye = feet
+        + Vec3::Y
+            * if state.crouching {
+                cfg.crouch_view_height
+            } else {
+                cfg.view_height
+            };
+
+    ladders.iter().any(|(ladder, ladder_transform)| {
+        box3d_ladder_contains(ladder, ladder_transform, cfg.radius, feet)
+            || box3d_ladder_contains(ladder, ladder_transform, cfg.radius, waist)
+            || box3d_ladder_contains(ladder, ladder_transform, cfg.radius, eye)
+    })
+}
+
+fn box3d_ladder_contains(
+    ladder: &Box3dLadder,
+    transform: &Transform,
+    character_radius: f32,
+    point: Vec3,
+) -> bool {
+    let local_point = transform.compute_affine().inverse().transform_point3(point);
+    let half_extents = ladder.half_extents + Vec3::new(character_radius, 0.0, character_radius);
+    local_point.abs().cmple(half_extents).all()
 }
 
 fn handle_box3d_crouching(
@@ -3140,6 +3304,193 @@ mod tests {
     }
 
     #[test]
+    fn ladder_volume_includes_character_radius() {
+        let ladder = Box3dLadder::cuboid(Vec3::new(0.05, 1.0, 0.5));
+        let transform = Transform::from_xyz(0.0, 1.0, 0.0);
+
+        assert!(box3d_ladder_contains(
+            &ladder,
+            &transform,
+            0.4,
+            Vec3::new(0.4, 1.0, 0.0)
+        ));
+        assert!(!box3d_ladder_contains(
+            &ladder,
+            &transform,
+            0.4,
+            Vec3::new(0.5, 1.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn ladder_input_moves_vertically() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.5, -0.8)));
+        let _wall_shape =
+            wall.create_box(box3d::Vec3::new(2.0, 1.0, 0.1), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            water_acceleration_hz: 100.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+        let look = CharacterLook::default();
+        let transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+        let mut input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            ..Default::default()
+        };
+
+        prepare_box3d_ladder_velocity(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &look,
+            &transform,
+            Vec3::NEG_Z * cfg.speed,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y > 0.0, "{:?}", state.velocity);
+
+        input.last_movement = Some(Vec2::NEG_Y);
+        prepare_box3d_ladder_velocity(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &look,
+            &transform,
+            Vec3::ZERO,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y < 0.0, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ladder_forward_without_adjacent_collider_does_not_climb() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            water_acceleration_hz: 100.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            ..Default::default()
+        };
+
+        prepare_box3d_ladder_velocity(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &CharacterLook::default(),
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::NEG_Z * cfg.speed,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y.abs() <= f32::EPSILON, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ladder_look_down_forward_moves_down() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            water_acceleration_hz: 100.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            ..Default::default()
+        };
+        let look = CharacterLook {
+            pitch: -60.0_f32.to_radians(),
+            ..Default::default()
+        };
+
+        prepare_box3d_ladder_velocity(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &look,
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::ZERO,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y < 0.0, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ladder_crouch_still_allows_ladder_movement() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 0.5, -0.8)));
+        let _wall_shape =
+            wall.create_box(box3d::Vec3::new(2.0, 1.0, 0.1), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController {
+            speed: 5.0,
+            water_acceleration_hz: 100.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            crouched: true,
+            ..Default::default()
+        };
+
+        prepare_box3d_ladder_velocity(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &CharacterLook::default(),
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::NEG_Z * cfg.speed,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.y > 0.0, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn ladder_crouch_finish_tick_does_not_apply_gravity() {
+        let cfg = Box3dCharacterController {
+            gravity: 12.0,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState::default();
+
+        finish_box3d_kcc_tick(&cfg, &WaterState::default(), true, &mut state, 1.0 / 60.0);
+
+        assert_eq!(state.velocity.y, 0.0);
+    }
+
+    #[test]
     fn tac_redirects_glancing_movement_away_from_wall() {
         let cfg = Box3dCharacterController::default();
         let mut state = Box3dCharacterControllerState {
@@ -3178,7 +3529,7 @@ mod tests {
         let cfg = Box3dCharacterController::default();
         let state = Box3dCharacterControllerState::default();
         let input = AccumulatedInput {
-            last_movement: Some(bevy_math::Vec2::Y),
+            last_movement: Some(Vec2::Y),
             ..Default::default()
         };
 
@@ -3243,7 +3594,7 @@ mod tests {
     fn climb_factor_uses_input_and_look_pitch() {
         let cfg = Box3dCharacterController::default();
         let mut input = AccumulatedInput {
-            last_movement: Some(bevy_math::Vec2::Y),
+            last_movement: Some(Vec2::Y),
             ..Default::default()
         };
         let look = CharacterLook {
@@ -3254,11 +3605,11 @@ mod tests {
         let forward = calculate_box3d_climb_factor(&cfg, &input, &look, Vec3::NEG_Z * cfg.speed);
         assert!(forward > 0.0, "{forward}");
 
-        input.last_movement = Some(bevy_math::Vec2::NEG_Y);
+        input.last_movement = Some(Vec2::NEG_Y);
         let backward = calculate_box3d_climb_factor(&cfg, &input, &look, Vec3::Z * cfg.speed);
         assert!(backward < 0.0, "{backward}");
 
-        input.last_movement = Some(bevy_math::Vec2::Y);
+        input.last_movement = Some(Vec2::Y);
         let looking_down = CharacterLook {
             pitch: -std::f32::consts::FRAC_PI_2,
             ..Default::default()
@@ -3350,7 +3701,7 @@ mod tests {
         let cfg = Box3dCharacterController::default();
         let mut state = Box3dCharacterControllerState::default();
         let mut input = AccumulatedInput {
-            last_movement: Some(bevy_math::Vec2::NEG_Y),
+            last_movement: Some(Vec2::NEG_Y),
             climbdown: Some(Stopwatch::new()),
             ..Default::default()
         };
@@ -3390,7 +3741,7 @@ mod tests {
         let mut mantle_input = Stopwatch::new();
         mantle_input.set_elapsed(cfg.mantle_input_buffer);
         let mut input = AccumulatedInput {
-            last_movement: Some(bevy_math::Vec2::Y),
+            last_movement: Some(Vec2::Y),
             jumped: Some(Stopwatch::new()),
             mantled: Some(mantle_input),
             ..Default::default()
@@ -3420,7 +3771,7 @@ mod tests {
             ..Default::default()
         };
         let mut input = AccumulatedInput {
-            last_movement: Some(bevy_math::Vec2::Y),
+            last_movement: Some(Vec2::Y),
             jumped: Some(Stopwatch::new()),
             mantled: None,
             ..Default::default()
