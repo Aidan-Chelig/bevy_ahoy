@@ -180,12 +180,27 @@ fn sync_camera_translation(
     last_step_down: Duration,
     time: &Time,
 ) {
-    camera_transform.translation.x = new_translation.x;
-    camera_transform.translation.z = new_translation.z;
-    if !camera.enable_smoothing {
-        camera_transform.translation.y = new_translation.y;
+    let distance = camera_transform.translation.distance(new_translation);
+    if !camera.enable_smoothing || distance >= camera.teleport_detection_distance {
+        camera_transform.translation = new_translation;
         return;
     }
+
+    // The controller advances at the fixed simulation rate, while this runs
+    // once per rendered frame. Smooth the presentation transform so horizontal
+    // motion does not visibly staircase between simulation ticks.
+    let movement_decay_rate = f32::ln(100_000_000.0);
+    camera_transform.translation.x.smooth_nudge(
+        &new_translation.x,
+        movement_decay_rate,
+        time.delta_secs(),
+    );
+    camera_transform.translation.z.smooth_nudge(
+        &new_translation.z,
+        movement_decay_rate,
+        time.delta_secs(),
+    );
+
     if last_step_up < camera.step_smooth_time || last_step_down < camera.step_smooth_time {
         let decay_rate = f32::ln(100000.0);
         camera_transform.translation.y.smooth_nudge(
@@ -193,17 +208,12 @@ fn sync_camera_translation(
             decay_rate,
             time.delta_secs(),
         );
-    } else if new_translation.y - camera_transform.translation.y
-        < camera.teleport_detection_distance
-    {
-        let decay_rate = f32::ln(100_000_000.0);
+    } else {
         camera_transform.translation.y.smooth_nudge(
             &new_translation.y,
-            decay_rate,
+            movement_decay_rate,
             time.delta_secs(),
         );
-    } else {
-        camera_transform.translation.y = new_translation.y;
     }
 }
 
