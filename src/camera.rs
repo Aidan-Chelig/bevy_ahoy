@@ -186,20 +186,11 @@ fn sync_camera_translation(
         return;
     }
 
-    // The controller advances at the fixed simulation rate, while this runs
-    // once per rendered frame. Smooth the presentation transform so horizontal
-    // motion does not visibly staircase between simulation ticks.
-    let movement_decay_rate = f32::ln(100_000_000.0);
-    camera_transform.translation.x.smooth_nudge(
-        &new_translation.x,
-        movement_decay_rate,
-        time.delta_secs(),
-    );
-    camera_transform.translation.z.smooth_nudge(
-        &new_translation.z,
-        movement_decay_rate,
-        time.delta_secs(),
-    );
+    // Physics props are presented directly from the fixed simulation. Keep
+    // horizontal camera motion on that same timeline so held objects do not
+    // jitter relative to the view.
+    camera_transform.translation.x = new_translation.x;
+    camera_transform.translation.z = new_translation.z;
 
     if last_step_up < camera.step_smooth_time || last_step_down < camera.step_smooth_time {
         let decay_rate = f32::ln(100000.0);
@@ -209,6 +200,7 @@ fn sync_camera_translation(
             time.delta_secs(),
         );
     } else {
+        let movement_decay_rate = f32::ln(100_000_000.0);
         camera_transform.translation.y.smooth_nudge(
             &new_translation.y,
             movement_decay_rate,
