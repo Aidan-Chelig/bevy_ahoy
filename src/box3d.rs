@@ -25,7 +25,8 @@ use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    CharacterController, CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
+    CharacterController, CharacterControllerCameraOf, CharacterControllerOutput, CharacterLook,
+    MantleOutput, TouchingEntity,
     input::AccumulatedInput,
     kcc,
     water::{WaterLevel, WaterState},
@@ -44,7 +45,7 @@ pub mod prelude {
         AhoyBox3dSystems, AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
         Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dLadder,
         Box3dMantleState, Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime,
-        Box3dWater,
+        Box3dPickupDebugState, Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -97,6 +98,7 @@ impl AhoyBox3dPlugin {
 impl Plugin for AhoyBox3dPlugin {
     fn build(&self, app: &mut bevy_app::App) {
         app.add_message::<Box3dPickupInput>()
+            .init_resource::<Box3dPickupDebugState>()
             .insert_resource(self.config)
             .insert_non_send_resource(Box3dRuntime::new(self.config))
             .configure_sets(self.schedule, AhoyBox3dSystems::Tick)
@@ -337,7 +339,7 @@ impl Default for Box3dPickupActor {
             prop_filter: box3d::QueryFilter::default(),
             max_distance: 3.0,
             preferred_distance: 1.0,
-            hold_hz: 14.0,
+            hold_hz: 12.0,
             throw_speed: 12.0,
             max_prop_mass: 1000.0,
         }
@@ -345,9 +347,17 @@ impl Default for Box3dPickupActor {
 }
 
 /// Body currently held by a [`Box3dPickupActor`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Component)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Box3dHolding {
     pub body: Entity,
+    pub local_point: Vec3,
+}
+
+/// Debug points for the active pickup ray and spring target.
+#[derive(Clone, Copy, Debug, Default, Resource)]
+pub struct Box3dPickupDebugState {
+    pub hit_point: Option<Vec3>,
+    pub target_point: Option<Vec3>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -861,51 +871,85 @@ fn handle_box3d_pickup_input(
     mut commands: Commands,
     runtime: NonSend<Box3dRuntime>,
     mut inputs: MessageReader<Box3dPickupInput>,
-    actors: Query<(
-        &Box3dPickupActor,
+    mut actors: Query<(
+        &mut Box3dPickupActor,
         &Transform,
         &CharacterLook,
         Option<&Box3dHolding>,
     )>,
+    cameras: Query<(&Transform, &CharacterControllerCameraOf)>,
     mut character_states: Query<&mut Box3dCharacterControllerState>,
+    mut debug: ResMut<Box3dPickupDebugState>,
 ) {
     for input in inputs.read() {
         match input.action {
             Box3dPickupAction::Pull => {
-                let Ok((actor, transform, look, holding)) = actors.get(input.actor) else {
+                let Ok((mut actor, transform, look, holding)) = actors.get_mut(input.actor) else {
                     continue;
                 };
                 if holding.is_some() {
                     continue;
                 }
-                let Some(body_entity) =
-                    find_box3d_pickup_body(&runtime, actor, transform.translation, look)
+                let (ray_origin, ray_direction) = cameras
+                    .iter()
+                    .next()
+                    .map(|(transform, _)| (transform, transform.rotation * Vec3::NEG_Z))
+                    .unwrap_or((transform, box3d_pickup_forward(look)));
+                let Some((body_entity, hit_point)) = find_box3d_pickup_body(
+                    &runtime,
+                    &actor,
+                    ray_origin.translation,
+                    ray_direction,
+                )
                 else {
                     continue;
                 };
+                let Some(body) = runtime.body(body_entity) else {
+                    continue;
+                };
+                let Some(body_transform) = body.transform() else {
+                    continue;
+                };
+                let body_position = from_box3d_vec3(body_transform.p);
+                let body_rotation = from_box3d_quat(body_transform.q);
+                let hit_point = from_box3d_vec3(hit_point);
+                actor.preferred_distance = ray_origin.translation.distance(hit_point);
+                debug.hit_point = Some(hit_point);
+                debug.target_point = Some(hit_point);
                 commands
                     .entity(input.actor)
-                    .insert(Box3dHolding { body: body_entity });
+                    .insert(Box3dHolding {
+                        body: body_entity,
+                        local_point: body_rotation.inverse()
+                            * (hit_point - body_position),
+                    });
                 if let Ok(mut state) = character_states.get_mut(input.actor) {
                     state.held_body = Some(body_entity);
                 }
             }
             Box3dPickupAction::Drop | Box3dPickupAction::Throw => {
-                let Ok((actor, _transform, look, holding)) = actors.get(input.actor) else {
+                let Ok((actor, _transform, look, holding)) = actors.get_mut(input.actor) else {
                     continue;
                 };
                 let Some(holding) = holding else {
                     continue;
                 };
+                let ray_direction = cameras
+                    .iter()
+                    .next()
+                    .map(|(transform, _)| transform.rotation * Vec3::NEG_Z)
+                    .unwrap_or_else(|| box3d_pickup_forward(look));
                 if input.action == Box3dPickupAction::Throw
                     && let Some(body) = runtime.body(holding.body)
                     && body.is_valid()
                 {
                     body.set_linear_velocity(to_box3d_vec3(
-                        box3d_pickup_forward(look) * actor.throw_speed,
+                        ray_direction * actor.throw_speed,
                     ));
                 }
                 commands.entity(input.actor).remove::<Box3dHolding>();
+                debug.hit_point = None;
+                debug.target_point = None;
                 if let Ok(mut state) = character_states.get_mut(input.actor) {
                     state.held_body = None;
                 }
@@ -917,7 +961,14 @@ fn handle_box3d_pickup_input(
 fn update_box3d_pickup_holds(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
-    actors: Query<(&Box3dPickupActor, &Transform, &CharacterLook, &Box3dHolding)>,
+    actors: Query<(
+        &Box3dPickupActor,
+        &Transform,
+        &CharacterLook,
+        &Box3dHolding,
+    )>,
+    cameras: Query<(&Transform, &CharacterControllerCameraOf)>,
+    mut debug: ResMut<Box3dPickupDebugState>,
 ) {
     let delta = time.delta_secs();
     if delta <= 0.0 {
@@ -930,12 +981,32 @@ fn update_box3d_pickup_holds(
         if !body.is_valid() || body.body_type() != box3d::BodyType::Dynamic {
             continue;
         }
-        let target =
-            transform.translation + box3d_pickup_forward(look) * actor.preferred_distance.max(0.0);
-        let position = from_box3d_vec3(body.world_center_of_mass());
-        let desired_velocity = (target - position) * actor.hold_hz.max(0.0);
-        body.set_linear_velocity(to_box3d_vec3(desired_velocity));
-        body.set_angular_velocity(box3d::Vec3::ZERO);
+        let (target_transform, target_direction) = cameras
+            .iter()
+            .next()
+            .map(|(transform, _)| (transform, transform.rotation * Vec3::NEG_Z))
+            .unwrap_or((transform, box3d_pickup_forward(look)));
+        let target = target_transform.translation
+            + target_direction * actor.preferred_distance.max(0.0);
+        debug.target_point = Some(target);
+        let Some(body_transform) = body.transform() else {
+            continue;
+        };
+        let body_position = from_box3d_vec3(body_transform.p);
+        let body_rotation = from_box3d_quat(body_transform.q);
+        let anchor = body_position + body_rotation * holding.local_point;
+        debug.hit_point = Some(anchor);
+        let anchor_velocity = from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(anchor)));
+        let error = target - anchor;
+        let hold_hz = actor.hold_hz.max(0.0);
+        let inverse_mass = body.inverse_mass();
+        if inverse_mass <= 0.0 || hold_hz <= 0.0 {
+            continue;
+        }
+        let mass = inverse_mass.recip();
+        let force = error * (mass * hold_hz * hold_hz)
+            - anchor_velocity * (mass * 2.0 * hold_hz);
+        body.apply_force(to_box3d_vec3(force), to_box3d_vec3(anchor), true);
     }
 }
 
@@ -943,12 +1014,12 @@ fn find_box3d_pickup_body(
     runtime: &Box3dRuntime,
     actor: &Box3dPickupActor,
     origin: Vec3,
-    look: &CharacterLook,
-) -> Option<Entity> {
+    direction: Vec3,
+) -> Option<(Entity, box3d::Vec3)> {
     let mut hit_body = None;
     runtime.world.cast_ray(
         to_box3d_vec3(origin),
-        to_box3d_vec3(box3d_pickup_forward(look) * actor.max_distance.max(0.0)),
+        to_box3d_vec3(direction * actor.max_distance.max(0.0)),
         actor.prop_filter,
         |hit| {
             let Some(body_entity) = runtime.body_entity_for_shape(hit.shape.id()) else {
@@ -968,7 +1039,7 @@ fn find_box3d_pickup_body(
             if mass > actor.max_prop_mass {
                 return hit.fraction;
             }
-            hit_body = Some(body_entity);
+            hit_body = Some((body_entity, hit.point));
             hit.fraction
         },
     );
@@ -3278,7 +3349,7 @@ mod tests {
             &runtime,
             &Box3dPickupActor::default(),
             Vec3::ZERO,
-            &CharacterLook::default(),
+            box3d_pickup_forward(&CharacterLook::default()),
         );
 
         assert_eq!(picked, None);
