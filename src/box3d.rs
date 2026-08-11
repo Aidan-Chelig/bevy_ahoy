@@ -328,6 +328,9 @@ pub struct Box3dPickupActor {
     pub max_distance: f32,
     pub preferred_distance: f32,
     pub hold_hz: f32,
+    pub max_hold_acceleration: f32,
+    pub hold_angular_damping: f32,
+    pub max_hold_angular_speed: f32,
     pub throw_speed: f32,
     pub max_prop_mass: f32,
 }
@@ -339,6 +342,9 @@ impl Default for Box3dPickupActor {
             max_distance: 3.0,
             preferred_distance: 1.0,
             hold_hz: 12.0,
+            max_hold_acceleration: 80.0,
+            hold_angular_damping: 8.0,
+            max_hold_angular_speed: 20.0,
             throw_speed: 12.0,
             max_prop_mass: 1000.0,
         }
@@ -515,6 +521,7 @@ impl From<CharacterController> for Box3dCharacterController {
 /// Runtime state for [`Box3dCharacterController`].
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct Box3dCharacterControllerState {
+    pub noclip: bool,
     pub velocity: Vec3,
     pub platform_velocity: Vec3,
     pub platform_angular_velocity: Vec3,
@@ -535,6 +542,7 @@ impl Default for Box3dCharacterControllerState {
         let mut last_ground = Stopwatch::new();
         last_ground.set_elapsed(Duration::MAX);
         Self {
+            noclip: false,
             velocity: Vec3::ZERO,
             platform_velocity: Vec3::ZERO,
             platform_angular_velocity: Vec3::ZERO,
@@ -998,7 +1006,15 @@ fn update_box3d_pickup_holds(
         let mass = inverse_mass.recip();
         let force = error * (mass * hold_hz * hold_hz)
             - anchor_velocity * (mass * 2.0 * hold_hz);
+        let max_force = mass * actor.max_hold_acceleration.max(0.0);
+        let force = force.clamp_length_max(max_force);
         body.apply_force(to_box3d_vec3(force), to_box3d_vec3(anchor), true);
+
+        let angular_velocity = from_box3d_vec3(body.angular_velocity());
+        let damping = 1.0 + actor.hold_angular_damping.max(0.0) * delta;
+        let angular_velocity = (angular_velocity / damping)
+            .clamp_length_max(actor.max_hold_angular_speed.max(0.0));
+        body.set_angular_velocity(to_box3d_vec3(angular_velocity));
     }
 }
 
@@ -1101,6 +1117,19 @@ fn run_box3d_kcc(
     let delta = time.delta_secs();
     for (cfg, mut state, mut input, look, mut water, mut output, mut transform) in &mut characters {
         prepare_box3d_kcc_tick(&time, &mut state, &mut output);
+
+        if state.noclip {
+            move_box3d_noclip_character(
+                cfg,
+                &mut state,
+                &mut input,
+                look,
+                &mut water,
+                &mut transform,
+                delta,
+            );
+            continue;
+        }
 
         depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
@@ -1245,6 +1274,37 @@ fn run_box3d_kcc(
         finish_box3d_kcc_tick(cfg, &water, on_ladder && input.crouched, &mut state, delta);
         validate_box3d_velocity(cfg, &mut state);
     }
+}
+
+fn move_box3d_noclip_character(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+    input: &mut AccumulatedInput,
+    look: &CharacterLook,
+    water: &mut WaterState,
+    transform: &mut Transform,
+    delta: f32,
+) {
+    let movement = input.last_movement.unwrap_or_default();
+    let orientation = look.to_quat();
+    let mut direction = orientation * Vec3::NEG_Z * movement.y
+        + orientation * Vec3::X * movement.x;
+    if input.jumped.take().is_some() {
+        direction += Vec3::Y;
+    }
+    if input.crouched {
+        direction -= Vec3::Y;
+    }
+
+    state.velocity = direction.normalize_or_zero() * cfg.speed;
+    state.platform_velocity = Vec3::ZERO;
+    state.platform_angular_velocity = Vec3::ZERO;
+    state.grounded = None;
+    state.crouching = false;
+    state.crane_height_left = None;
+    state.mantle = None;
+    *water = WaterState::default();
+    transform.translation += state.velocity * delta;
 }
 
 fn prepare_box3d_kcc_tick(
