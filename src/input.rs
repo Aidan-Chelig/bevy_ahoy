@@ -5,7 +5,9 @@ use bevy_time::Stopwatch;
 
 use crate::CharacterControllerState;
 #[cfg(feature = "box3d")]
-use crate::box3d::{Box3dPickupAction, Box3dPickupInput};
+use crate::box3d::{
+    Box3dPickupAction, Box3dPickupInput, Box3dPickupInputExternallyDriven,
+};
 use crate::kcc::{forward, right};
 use crate::prelude::*;
 
@@ -192,8 +194,13 @@ fn apply_pull(
     crouch: On<Fire<PullObject>>,
     #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
     #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
+    #[cfg(feature = "box3d")] externally_driven: Query<(), With<Box3dPickupInputExternallyDriven>>,
 ) {
     let actor = crouch.context;
+    #[cfg(feature = "box3d")]
+    if externally_driven.contains(actor) {
+        return;
+    }
     #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Pull,
@@ -211,8 +218,13 @@ fn apply_drop(
     crouch: On<Fire<DropObject>>,
     #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
     #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
+    #[cfg(feature = "box3d")] externally_driven: Query<(), With<Box3dPickupInputExternallyDriven>>,
 ) {
     let actor = crouch.context;
+    #[cfg(feature = "box3d")]
+    if externally_driven.contains(actor) {
+        return;
+    }
     #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Drop,
@@ -230,8 +242,13 @@ fn apply_throw(
     crouch: On<Fire<ThrowObject>>,
     #[cfg(feature = "pickup")] mut avian_pickup_input_writer: MessageWriter<AvianPickupInput>,
     #[cfg(feature = "box3d")] mut box3d_pickup_input_writer: MessageWriter<Box3dPickupInput>,
+    #[cfg(feature = "box3d")] externally_driven: Query<(), With<Box3dPickupInputExternallyDriven>>,
 ) {
     let actor = crouch.context;
+    #[cfg(feature = "box3d")]
+    if externally_driven.contains(actor) {
+        return;
+    }
     #[cfg(feature = "pickup")]
     avian_pickup_input_writer.write(AvianPickupInput {
         action: AvianPickupAction::Throw,
