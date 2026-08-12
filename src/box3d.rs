@@ -42,7 +42,8 @@ pub mod prelude {
     pub use super::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dSystems, AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
-        Box3dCharacterControllerState, Box3dColliderShape, Box3dHolding, Box3dLadder,
+        Box3dCharacterControllerOrder, Box3dCharacterControllerState, Box3dColliderShape,
+        Box3dHolding, Box3dLadder,
         Box3dMantleState, Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime,
         Box3dPickupDebugState, Box3dPickupInputExternallyDriven, Box3dWater,
         bevy_box3d::{
@@ -449,6 +450,10 @@ pub struct Box3dCharacterController {
     pub step_down_detection_distance: f32,
     pub min_step_ledge_space: f32,
 }
+
+/// Stable simulation ordering key for operations shared by multiple character controllers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Component)]
+pub struct Box3dCharacterControllerOrder(pub u64);
 
 impl Default for Box3dCharacterController {
     fn default() -> Self {
@@ -1448,10 +1453,11 @@ fn apply_box3d_kcc_impulses(
         Entity,
         &Box3dCharacterController,
         &CharacterControllerOutput,
+        Option<&Box3dCharacterControllerOrder>,
     )>,
 ) {
     let mut impulses = Vec::new();
-    for (character_entity, cfg, output) in &characters {
+    for (character_entity, cfg, output, order) in &characters {
         let mut pushed_bodies = HashSet::new();
         for touch in &output.touching_entities {
             let Some(body_entity) = runtime.body_entity_for_shape_entity(touch.entity) else {
@@ -1478,11 +1484,16 @@ fn apply_box3d_kcc_impulses(
                 continue;
             }
 
-            impulses.push((body_entity, character_entity, touch.point, impulse));
+            impulses.push((
+                body_entity,
+                order.map(|order| order.0).unwrap_or(character_entity.to_bits()),
+                touch.point,
+                impulse,
+            ));
         }
     }
-    impulses.sort_by_key(|(body_entity, character_entity, ..)| {
-        (body_entity.to_bits(), character_entity.to_bits())
+    impulses.sort_by_key(|(body_entity, character_order, ..)| {
+        (body_entity.to_bits(), *character_order)
     });
     for (body_entity, _, point, impulse) in impulses {
         let Some(body) = runtime.body(body_entity) else {
