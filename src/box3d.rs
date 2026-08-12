@@ -16,7 +16,7 @@ use bevy_ecs::{
     schedule::ScheduleLabel,
     system::{NonSend, NonSendMut},
 };
-use bevy_math::{Dir3, Quat, Vec3, Vec3Swizzles};
+use bevy_math::{Dir3, Mat3, Quat, Vec3, Vec3Swizzles};
 #[cfg(test)]
 use bevy_math::Vec2;
 use bevy_time::{Stopwatch, Time};
@@ -343,7 +343,7 @@ impl Default for Box3dPickupActor {
             preferred_distance: 1.0,
             hold_hz: 12.0,
             max_hold_acceleration: 80.0,
-            hold_angular_damping: 8.0,
+            hold_angular_damping: 6.0,
             max_hold_angular_speed: 20.0,
             throw_speed: 12.0,
             max_prop_mass: 1000.0,
@@ -1003,19 +1003,61 @@ fn update_box3d_pickup_holds(
         if inverse_mass <= 0.0 || hold_hz <= 0.0 {
             continue;
         }
-        let mass = inverse_mass.recip();
-        let force = error * (mass * hold_hz * hold_hz)
-            - anchor_velocity * (mass * 2.0 * hold_hz);
-        let max_force = mass * actor.max_hold_acceleration.max(0.0);
-        let force = force.clamp_length_max(max_force);
-        body.apply_force(to_box3d_vec3(force), to_box3d_vec3(anchor), true);
+        let desired_acceleration = (error * (hold_hz * hold_hz)
+            - anchor_velocity * (2.0 * hold_hz))
+            .clamp_length_max(actor.max_hold_acceleration.max(0.0));
+        if let Some(impulse) = box3d_point_impulse_for_velocity_change(
+            body,
+            anchor,
+            desired_acceleration * delta,
+        ) {
+            body.apply_linear_impulse(
+                to_box3d_vec3(impulse),
+                to_box3d_vec3(anchor),
+                true,
+            );
+        }
 
         let angular_velocity = from_box3d_vec3(body.angular_velocity());
         let damping = 1.0 + actor.hold_angular_damping.max(0.0) * delta;
-        let angular_velocity = (angular_velocity / damping)
-            .clamp_length_max(actor.max_hold_angular_speed.max(0.0));
-        body.set_angular_velocity(to_box3d_vec3(angular_velocity));
+        body.set_angular_velocity(to_box3d_vec3(angular_velocity / damping));
     }
+}
+
+fn box3d_point_impulse_for_velocity_change(
+    body: box3d::BodyId,
+    point: Vec3,
+    velocity_change: Vec3,
+) -> Option<Vec3> {
+    if !velocity_change.is_finite() {
+        return None;
+    }
+    let inverse_mass = body.inverse_mass();
+    if !inverse_mass.is_finite() || inverse_mass <= 0.0 {
+        return None;
+    }
+
+    let lever = point - from_box3d_vec3(body.world_center_of_mass());
+    let inverse_inertia = body.world_inverse_rotational_inertia();
+    let inverse_inertia = Mat3::from_cols(
+        from_box3d_vec3(inverse_inertia.cx),
+        from_box3d_vec3(inverse_inertia.cy),
+        from_box3d_vec3(inverse_inertia.cz),
+    );
+    let response = |impulse: Vec3| {
+        impulse * inverse_mass + (inverse_inertia * lever.cross(impulse)).cross(lever)
+    };
+    let point_inverse_mass = Mat3::from_cols(
+        response(Vec3::X),
+        response(Vec3::Y),
+        response(Vec3::Z),
+    );
+    let determinant = point_inverse_mass.determinant();
+    if !determinant.is_finite() || determinant.abs() <= 1e-8 {
+        return None;
+    }
+    let impulse = point_inverse_mass.inverse() * velocity_change;
+    impulse.is_finite().then_some(impulse)
 }
 
 fn find_box3d_pickup_body(
@@ -4481,6 +4523,29 @@ mod tests {
         let separating =
             calculate_box3d_push_impulse(body_id, 80.0, Vec3::ZERO, Vec3::X, Vec3::NEG_X);
         assert_eq!(separating, Vec3::ZERO);
+    }
+
+    #[test]
+    fn pickup_point_impulse_produces_requested_endpoint_velocity() {
+        let world = box3d::World::new(box3d::Vec3::ZERO);
+        let body = world.create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::ZERO));
+        let _shape = body.create_box(
+            box3d::Vec3::new(2.0, 0.2, 0.2),
+            box3d::ShapeDef {
+                density: 1.0,
+                ..Default::default()
+            },
+        );
+        let body_id = body.id();
+        let point = Vec3::new(2.0, 0.0, 0.0);
+        let requested = Vec3::new(0.2, -0.35, 0.1);
+        let impulse =
+            box3d_point_impulse_for_velocity_change(body_id, point, requested).unwrap();
+
+        body_id.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(point), true);
+        let actual = from_box3d_vec3(body_id.world_point_velocity(to_box3d_vec3(point)));
+
+        assert!(actual.abs_diff_eq(requested, 1e-4), "{actual:?} vs {requested:?}");
     }
 
     #[test]
