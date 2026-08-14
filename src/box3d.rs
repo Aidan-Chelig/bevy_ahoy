@@ -16,9 +16,9 @@ use bevy_ecs::{
     schedule::ScheduleLabel,
     system::{NonSend, NonSendMut},
 };
-use bevy_math::{Dir3, Mat3, Quat, Vec3, Vec3Swizzles};
 #[cfg(test)]
 use bevy_math::Vec2;
+use bevy_math::{Dir3, Mat3, Quat, Vec3, Vec3Swizzles};
 use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
 use core::time::Duration;
@@ -43,9 +43,9 @@ pub mod prelude {
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
         AhoyBox3dSystems, AhoyBox3dVelocity, Box3dBodyType, Box3dCastHit, Box3dCharacterController,
         Box3dCharacterControllerOrder, Box3dCharacterControllerState, Box3dColliderShape,
-        Box3dHolding, Box3dLadder,
-        Box3dMantleState, Box3dPickupAction, Box3dPickupActor, Box3dPickupInput, Box3dRuntime,
-        Box3dPickupDebugState, Box3dPickupInputExternallyDriven, Box3dWater,
+        Box3dHolding, Box3dLadder, Box3dMantleState, Box3dPickupAction, Box3dPickupActor,
+        Box3dPickupDebugState, Box3dPickupInput, Box3dPickupInputExternallyDriven, Box3dRuntime,
+        Box3dWater,
         bevy_box3d::{
             Box3dBody, Box3dConfig, Box3dContactEnded, Box3dContactHit, Box3dContactStarted,
             Box3dDebugConfig, Box3dDebugPlugin, Box3dPlugin, Box3dSensorEnded, Box3dSensorStarted,
@@ -905,17 +905,16 @@ fn handle_box3d_pickup_input(
                 else {
                     continue;
                 };
+                if state.noclip {
+                    continue;
+                }
                 if holding.is_some() {
                     continue;
                 }
                 let ray_origin = box3d_pickup_eye_position(transform, controller, &state);
                 let ray_direction = box3d_pickup_forward(look);
-                let Some((body_entity, hit_point)) = find_box3d_pickup_body(
-                    &runtime,
-                    &actor,
-                    ray_origin,
-                    ray_direction,
-                )
+                let Some((body_entity, hit_point)) =
+                    find_box3d_pickup_body(&runtime, &actor, ray_origin, ray_direction)
                 else {
                     continue;
                 };
@@ -931,13 +930,10 @@ fn handle_box3d_pickup_input(
                 actor.preferred_distance = ray_origin.distance(hit_point);
                 debug.hit_point = Some(hit_point);
                 debug.target_point = Some(hit_point);
-                commands
-                    .entity(input.actor)
-                    .insert(Box3dHolding {
-                        body: body_entity,
-                        local_point: body_rotation.inverse()
-                            * (hit_point - body_position),
-                    });
+                commands.entity(input.actor).insert(Box3dHolding {
+                    body: body_entity,
+                    local_point: body_rotation.inverse() * (hit_point - body_position),
+                });
                 state.held_body = Some(body_entity);
             }
             Box3dPickupAction::Drop | Box3dPickupAction::Throw => {
@@ -954,9 +950,7 @@ fn handle_box3d_pickup_input(
                     && let Some(body) = runtime.body(holding.body)
                     && body.is_valid()
                 {
-                    body.set_linear_velocity(to_box3d_vec3(
-                        ray_direction * actor.throw_speed,
-                    ));
+                    body.set_linear_velocity(to_box3d_vec3(ray_direction * actor.throw_speed));
                 }
                 commands.entity(input.actor).remove::<Box3dHolding>();
                 debug.hit_point = None;
@@ -985,6 +979,9 @@ fn update_box3d_pickup_holds(
         return;
     }
     for (actor, transform, look, controller, state, holding) in &actors {
+        if state.noclip {
+            continue;
+        }
         let Some(body) = runtime.body(holding.body) else {
             continue;
         };
@@ -1011,16 +1008,10 @@ fn update_box3d_pickup_holds(
         let desired_acceleration = (error * (hold_hz * hold_hz)
             - anchor_velocity * (2.0 * hold_hz))
             .clamp_length_max(actor.max_hold_acceleration.max(0.0));
-        if let Some(impulse) = box3d_point_impulse_for_velocity_change(
-            body,
-            anchor,
-            desired_acceleration * delta,
-        ) {
-            body.apply_linear_impulse(
-                to_box3d_vec3(impulse),
-                to_box3d_vec3(anchor),
-                true,
-            );
+        if let Some(impulse) =
+            box3d_point_impulse_for_velocity_change(body, anchor, desired_acceleration * delta)
+        {
+            body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(anchor), true);
         }
 
         let angular_velocity = from_box3d_vec3(body.angular_velocity());
@@ -1052,11 +1043,8 @@ fn box3d_point_impulse_for_velocity_change(
     let response = |impulse: Vec3| {
         impulse * inverse_mass + (inverse_inertia * lever.cross(impulse)).cross(lever)
     };
-    let point_inverse_mass = Mat3::from_cols(
-        response(Vec3::X),
-        response(Vec3::Y),
-        response(Vec3::Z),
-    );
+    let point_inverse_mass =
+        Mat3::from_cols(response(Vec3::X), response(Vec3::Y), response(Vec3::Z));
     let determinant = point_inverse_mass.determinant();
     if !determinant.is_finite() || determinant.abs() <= 1e-8 {
         return None;
@@ -1334,8 +1322,7 @@ fn move_box3d_noclip_character(
 ) {
     let movement = input.last_movement.unwrap_or_default();
     let orientation = look.to_quat();
-    let mut direction = orientation * Vec3::NEG_Z * movement.y
-        + orientation * Vec3::X * movement.x;
+    let mut direction = orientation * Vec3::NEG_Z * movement.y + orientation * Vec3::X * movement.x;
     if input.jumped.take().is_some() {
         direction += Vec3::Y;
     }
@@ -1486,7 +1473,9 @@ fn apply_box3d_kcc_impulses(
 
             impulses.push((
                 body_entity,
-                order.map(|order| order.0).unwrap_or(character_entity.to_bits()),
+                order
+                    .map(|order| order.0)
+                    .unwrap_or(character_entity.to_bits()),
                 touch.point,
                 impulse,
             ));
@@ -2205,11 +2194,7 @@ fn prepare_box3d_ladder_velocity(
         if forward.y < -cfg.climb_reverse_sin {
             ladder_velocity -= Vec3::Y * cfg.speed;
         } else if box3d_ladder_pushes_into_adjacent_collider(
-            runtime,
-            cfg,
-            state,
-            transform,
-            horizontal,
+            runtime, cfg, state, transform, horizontal,
         ) {
             ladder_velocity += Vec3::Y * cfg.speed;
             horizontal = Vec3::ZERO;
@@ -2246,8 +2231,14 @@ fn box3d_ladder_pushes_into_adjacent_collider(
     }
 
     let probe_distance = cfg.skin_width + cfg.radius * 0.25;
-    cast_box3d_character(runtime, cfg, state, transform.translation, direction * probe_distance)
-        .is_some_and(|hit| hit.normal.y.abs() < cfg.min_walk_cos && direction.dot(-hit.normal) > 0.5)
+    cast_box3d_character(
+        runtime,
+        cfg,
+        state,
+        transform.translation,
+        direction * probe_distance,
+    )
+    .is_some_and(|hit| hit.normal.y.abs() < cfg.min_walk_cos && direction.dot(-hit.normal) > 0.5)
 }
 
 fn box3d_ladder_move(
@@ -3591,7 +3582,11 @@ mod tests {
             1.0 / 60.0,
         );
 
-        assert!(state.velocity.y.abs() <= f32::EPSILON, "{:?}", state.velocity);
+        assert!(
+            state.velocity.y.abs() <= f32::EPSILON,
+            "{:?}",
+            state.velocity
+        );
     }
 
     #[test]
@@ -4550,13 +4545,15 @@ mod tests {
         let body_id = body.id();
         let point = Vec3::new(2.0, 0.0, 0.0);
         let requested = Vec3::new(0.2, -0.35, 0.1);
-        let impulse =
-            box3d_point_impulse_for_velocity_change(body_id, point, requested).unwrap();
+        let impulse = box3d_point_impulse_for_velocity_change(body_id, point, requested).unwrap();
 
         body_id.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(point), true);
         let actual = from_box3d_vec3(body_id.world_point_velocity(to_box3d_vec3(point)));
 
-        assert!(actual.abs_diff_eq(requested, 1e-4), "{actual:?} vs {requested:?}");
+        assert!(
+            actual.abs_diff_eq(requested, 1e-4),
+            "{actual:?} vs {requested:?}"
+        );
     }
 
     #[test]
