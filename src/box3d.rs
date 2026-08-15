@@ -1169,7 +1169,11 @@ fn run_box3d_kcc(
         depenetrate_box3d_character(&runtime, cfg, &state, &mut transform);
         update_box3d_grounded(&runtime, cfg, &mut state, &transform, delta);
 
-        handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
+        let started_crouching =
+            handle_box3d_crouching(&runtime, cfg, &mut state, &input, &transform);
+        if started_crouching && state.grounded.is_some() {
+            clamp_box3d_velocity_to_crouch_speed(cfg, &mut state);
+        }
         update_box3d_water(cfg, &state, &transform, &waters, &mut water);
         let on_ladder = water.level <= WaterLevel::Feet
             && box3d_character_touches_ladder(cfg, &state, &transform, &ladders);
@@ -1388,7 +1392,11 @@ fn move_box3d_character_for_state(
         prepare_box3d_water_velocity(cfg, state, input, look, delta);
         box3d_water_move(runtime, cfg, state, output, transform, delta);
     } else if state.grounded.is_some() {
-        ground_accelerate(cfg, state, wish_velocity, delta);
+        if state.crouching && wish_velocity.length_squared() > f32::EPSILON {
+            set_box3d_horizontal_velocity(state, wish_velocity);
+        } else {
+            ground_accelerate(cfg, state, wish_velocity, delta);
+        }
         state.velocity.y = state.velocity.y.min(0.0);
         box3d_ground_move(runtime, cfg, state, output, transform, delta);
     } else {
@@ -2816,7 +2824,8 @@ fn handle_box3d_crouching(
     state: &mut Box3dCharacterControllerState,
     input: &AccumulatedInput,
     transform: &Transform,
-) {
+) -> bool {
+    let was_crouching = state.crouching;
     if input.crouched {
         state.crouching = true;
     } else if state.crouching
@@ -2824,6 +2833,26 @@ fn handle_box3d_crouching(
     {
         state.crouching = false;
     }
+    !was_crouching && state.crouching
+}
+
+fn clamp_box3d_velocity_to_crouch_speed(
+    cfg: &Box3dCharacterController,
+    state: &mut Box3dCharacterControllerState,
+) {
+    let horizontal = state.velocity.xz();
+    let max_speed = (cfg.speed * cfg.crouch_speed_scale).max(0.0);
+    let clamped = horizontal.clamp_length_max(max_speed);
+    state.velocity.x = clamped.x;
+    state.velocity.z = clamped.y;
+}
+
+fn set_box3d_horizontal_velocity(
+    state: &mut Box3dCharacterControllerState,
+    velocity: Vec3,
+) {
+    state.velocity.x = velocity.x;
+    state.velocity.z = velocity.z;
 }
 
 fn box3d_standing_headroom_blocked(
@@ -3165,6 +3194,78 @@ mod tests {
         let crouching_foot = crouching[0].y - cfg.radius;
         assert_eq!(standing_foot, crouching_foot);
         assert!(crouching[1].y < standing[1].y);
+    }
+
+    #[test]
+    fn entering_crouch_immediately_clamps_horizontal_speed() {
+        let cfg = Box3dCharacterController {
+            speed: 6.0,
+            crouch_speed_scale: 0.5,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::new(6.0, -2.0, 8.0),
+            ..Default::default()
+        };
+
+        clamp_box3d_velocity_to_crouch_speed(&cfg, &mut state);
+
+        assert!((state.velocity.xz().length() - 3.0).abs() < 0.0001);
+        assert_eq!(state.velocity.y, -2.0);
+        assert!(state.velocity.xz().normalize().abs_diff_eq(Vec2::new(0.6, 0.8), 0.0001));
+    }
+
+    #[test]
+    fn entering_crouch_does_not_accelerate_slow_movement() {
+        let cfg = Box3dCharacterController {
+            speed: 6.0,
+            crouch_speed_scale: 0.5,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::new(1.0, 0.0, 0.0),
+            ..Default::default()
+        };
+
+        clamp_box3d_velocity_to_crouch_speed(&cfg, &mut state);
+
+        assert_eq!(state.velocity, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn crouched_ground_movement_uses_requested_speed_directly() {
+        let cfg = Box3dCharacterController {
+            speed: 12.0,
+            crouch_speed_scale: 0.75,
+            ..Default::default()
+        };
+        let input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            crouched: true,
+            ..Default::default()
+        };
+        let state = Box3dCharacterControllerState {
+            crouching: true,
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let wish_velocity =
+            calculate_wish_velocity(&cfg, &state, &input, &CharacterLook::default());
+        let mut moved_state = Box3dCharacterControllerState {
+            velocity: Vec3::new(2.0, -1.0, 0.0),
+            ..state
+        };
+
+        set_box3d_horizontal_velocity(&mut moved_state, wish_velocity);
+
+        assert!((moved_state.velocity.xz().length() - 9.0).abs() < 0.0001);
+        assert_eq!(moved_state.velocity.y, -1.0);
     }
 
     #[test]
