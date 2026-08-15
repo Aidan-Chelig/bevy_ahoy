@@ -19,6 +19,7 @@ use bevy_ecs::{
 #[cfg(test)]
 use bevy_math::Vec2;
 use bevy_math::{Dir3, Mat3, Quat, Vec3, Vec3Swizzles};
+use bevy_reflect::Reflect;
 use bevy_time::{Stopwatch, Time};
 use bevy_transform::prelude::Transform;
 use core::time::Duration;
@@ -97,7 +98,11 @@ impl AhoyBox3dPlugin {
 
 impl Plugin for AhoyBox3dPlugin {
     fn build(&self, app: &mut bevy_app::App) {
-        app.add_message::<Box3dPickupInput>()
+        app.register_type::<Box3dCharacterController>()
+            .register_type::<Box3dCharacterControllerState>()
+            .register_type::<Box3dCastHit>()
+            .register_type::<Box3dMantleState>()
+            .add_message::<Box3dPickupInput>()
             .init_resource::<Box3dPickupDebugState>()
             .insert_resource(self.config)
             .insert_non_send_resource(Box3dRuntime::new(self.config))
@@ -384,7 +389,8 @@ pub struct Box3dPickupInput {
 }
 
 /// Source-style kinematic character controller backed by Box3D shape casts.
-#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[derive(Clone, Copy, Debug, PartialEq, Component, Reflect)]
+#[reflect(Component)]
 #[require(
     AccumulatedInput,
     Box3dCharacterControllerState,
@@ -524,7 +530,8 @@ impl From<CharacterController> for Box3dCharacterController {
 }
 
 /// Runtime state for [`Box3dCharacterController`].
-#[derive(Clone, Debug, PartialEq, Component)]
+#[derive(Clone, Debug, PartialEq, Component, Reflect)]
+#[reflect(Component)]
 pub struct Box3dCharacterControllerState {
     pub noclip: bool,
     pub velocity: Vec3,
@@ -565,7 +572,7 @@ impl Default for Box3dCharacterControllerState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Box3dMantleState {
     pub wall_normal: Dir3,
     pub ledge_position: Vec3,
@@ -576,7 +583,7 @@ pub struct Box3dMantleState {
 }
 
 /// Hit data produced by Box3D character casts.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Box3dCastHit {
     pub entity: Option<Entity>,
     pub distance: f32,
@@ -2414,6 +2421,16 @@ fn box3d_move_and_slide(
         };
 
         push_box3d_touch(output, &hit, transform.translation, state.velocity);
+        let clip_normal = box3d_kcc_contact_normal(
+            cfg,
+            state,
+            hit.point,
+            hit.normal,
+        );
+        if remaining.dot(clip_normal) >= -1.0e-4 {
+            transform.translation += remaining;
+            break;
+        }
 
         let travel = hit.distance.max(0.0);
         let direction = remaining.normalize_or_zero();
@@ -2423,10 +2440,10 @@ fn box3d_move_and_slide(
         }
 
         if !planes.iter().any(|plane: &box3d::CollisionPlane| {
-            from_box3d_vec3(plane.plane().normal).dot(hit.normal) > 0.999
+            from_box3d_vec3(plane.plane().normal).dot(clip_normal) > 0.999
         }) {
             planes.push(box3d::CollisionPlane::rigid(box3d::Plane {
-                normal: to_box3d_vec3(hit.normal),
+                normal: to_box3d_vec3(clip_normal),
                 offset: 0.0,
             }));
         }
@@ -2442,6 +2459,14 @@ fn box3d_move_and_slide(
 
 fn clip_box3d_kcc_vector(mut vector: Vec3, planes: &[box3d::CollisionPlane]) -> Vec3 {
     let original_y = vector.y;
+    let hits_ceiling = original_y > 0.0
+        && planes.iter().any(|plane| {
+            let normal = from_box3d_vec3(plane.plane().normal).normalize_or_zero();
+            normal.y < -0.01 && vector.dot(normal) < 0.0
+        });
+    if hits_ceiling {
+        vector.y = 0.0;
+    }
     for _ in 0..MAX_BOX3D_CLIP_PASSES {
         let before = vector;
         for plane in planes {
@@ -2464,6 +2489,24 @@ fn clip_box3d_kcc_vector(mut vector: Vec3, planes: &[box3d::CollisionPlane]) -> 
     vector
 }
 
+fn box3d_kcc_contact_normal(
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    contact_point: Vec3,
+    normal: Vec3,
+) -> Vec3 {
+    if normal.y >= -0.01 {
+        return normal;
+    }
+    let upper_sphere_center =
+        from_box3d_vec3(box3d_character_points(cfg, state.crouching)[1]).y;
+    let head_contact_limit = upper_sphere_center + cfg.radius * 0.5 - cfg.skin_width;
+    if contact_point.y >= head_contact_limit {
+        return normal;
+    }
+    Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero()
+}
+
 fn add_box3d_overlap_planes(
     runtime: &Box3dRuntime,
     cfg: &Box3dCharacterController,
@@ -2483,7 +2526,12 @@ fn add_box3d_overlap_planes(
             if box3d_state_holds_shape(runtime, state, shape.id()) {
                 return true;
             }
-            let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
+            let normal = box3d_kcc_contact_normal(
+                cfg,
+                state,
+                from_box3d_vec3(plane.point),
+                from_box3d_vec3(plane.plane.normal).normalize_or_zero(),
+            );
             if movement.dot(normal) < -1.0e-4
                 && !planes
                     .iter()
@@ -2527,29 +2575,25 @@ fn box3d_step_move(
 
     let up = Vec3::Y * cfg.step_size;
     let up_hit = cast_box3d_character(runtime, cfg, state, transform.translation, up);
-    if up_hit.is_some_and(|hit| hit.normal.y < -0.01 && hit.distance < cfg.step_size) {
+    let overhead_hit = up_hit.filter(|hit| hit.normal.y < -0.01);
+    if overhead_hit.is_some_and(|hit| hit.distance < cfg.step_size) {
         transform.translation = down_position;
         state.velocity = down_velocity;
         state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     }
-    let up_distance = up_hit.map(|hit| hit.distance).unwrap_or(cfg.step_size);
+    let up_distance = overhead_hit
+        .map(|hit| hit.distance)
+        .unwrap_or(cfg.step_size);
     transform.translation.y += up_distance;
-
-    let forward_probe = state.velocity.normalize_or_zero() * cfg.min_step_ledge_space;
-    if cast_box3d_character(runtime, cfg, state, transform.translation, forward_probe).is_some() {
-        transform.translation = down_position;
-        state.velocity = down_velocity;
-        state.tac_velocity = down_tac_velocity;
-        output.touching_entities = down_touching_entities;
-        return;
-    }
 
     box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
 
     let down = Vec3::NEG_Y * cfg.step_size;
-    let Some(down_hit) = cast_box3d_character(runtime, cfg, state, transform.translation, down)
+    let landing_probe = transform.translation
+        + movement.normalize_or_zero() * cfg.min_step_ledge_space;
+    let Some(down_hit) = cast_box3d_character(runtime, cfg, state, landing_probe, down)
     else {
         transform.translation = down_position;
         state.velocity = down_velocity;
@@ -2571,7 +2615,7 @@ fn box3d_step_move(
     let down_dist = down_position.xz().distance_squared(original_position.xz());
     let up_dist = up_position.xz().distance_squared(original_position.xz());
 
-    if down_dist >= up_dist {
+    if down_dist > up_dist + 1.0e-8 {
         transform.translation = down_position;
         state.velocity = down_velocity;
         state.tac_velocity = down_tac_velocity;
@@ -2861,7 +2905,7 @@ fn box3d_standing_headroom_blocked(
     origin: Vec3,
 ) -> bool {
     let points = box3d_character_points(cfg, false);
-    let mut planes = Vec::new();
+    let mut blocked = false;
     runtime.world.collide_mover(
         to_box3d_vec3(origin),
         points,
@@ -2869,19 +2913,28 @@ fn box3d_standing_headroom_blocked(
         box3d::QueryFilter::default(),
         |_, plane| {
             let normal = from_box3d_vec3(plane.plane.normal).normalize_or_zero();
-            if normal.y >= cfg.min_walk_cos {
-                return true;
+            if normal.y < -f32::EPSILON {
+                blocked = true;
+                return false;
             }
-            planes.push(box3d::CollisionPlane::rigid(plane.plane));
-            planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
+            true
         },
     );
-    if planes.is_empty() {
-        return false;
+    if blocked {
+        return true;
     }
 
-    let offset = from_box3d_vec3(box3d::solve_planes(box3d::Vec3::ZERO, &mut planes));
-    offset.y < -cfg.skin_width
+    let feet = origin.y - cfg.height * 0.5;
+    let probe_origin = Vec3::new(origin.x, feet + cfg.radius + cfg.skin_width, origin.z);
+    let probe_distance = (origin.y + cfg.height * 0.5 - probe_origin.y).max(0.0);
+    runtime
+        .world
+        .cast_ray_closest(
+            to_box3d_vec3(probe_origin),
+            box3d::Vec3::new(0.0, probe_distance, 0.0),
+            box3d::QueryFilter::default(),
+        )
+        .is_some()
 }
 
 fn box3d_character_intersects(
@@ -2926,7 +2979,16 @@ fn depenetrate_box3d_character(
             if box3d_state_holds_shape(runtime, state, shape.id()) {
                 return true;
             }
-            planes.push(box3d::CollisionPlane::rigid(plane.plane));
+            let normal = box3d_kcc_contact_normal(
+                cfg,
+                state,
+                from_box3d_vec3(plane.point),
+                from_box3d_vec3(plane.plane.normal).normalize_or_zero(),
+            );
+            planes.push(box3d::CollisionPlane::rigid(box3d::Plane {
+                normal: to_box3d_vec3(normal),
+                offset: plane.plane.offset,
+            }));
             planes.len() < MAX_BOX3D_DEPENETRATION_PLANES
         },
     );
@@ -3447,6 +3509,64 @@ mod tests {
         transform.translation.x = 1.0;
         handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
         assert!(!state.crouching);
+    }
+
+    #[test]
+    fn crouch_release_stays_crouched_below_dynamic_body() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::new(0.0, 1.55, 0.0)));
+        let _ceiling_shape =
+            ceiling.create_box(box3d::Vec3::new(1.0, 0.1, 1.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let input = AccumulatedInput::default();
+        let transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+
+        assert!(state.crouching);
+    }
+
+    #[test]
+    fn crouch_release_stays_crouched_below_32_unit_ceiling() {
+        const UNITS_PER_METER: f32 = 39.37008;
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let clearance = 32.0 / UNITS_PER_METER;
+        let ceiling_thickness = 2.0 / UNITS_PER_METER;
+        let ceiling = runtime.world.create_body(box3d::BodyDef::static_at(
+            box3d::Vec3::new(0.0, clearance + ceiling_thickness * 0.5, 0.0),
+        ));
+        let _ceiling_shape = ceiling.create_box(
+            box3d::Vec3::new(1.0, ceiling_thickness * 0.5, 1.0),
+            box3d::ShapeDef::default(),
+        );
+        let cfg = Box3dCharacterController {
+            height: 72.0 / UNITS_PER_METER,
+            crouch_height: 36.0 / UNITS_PER_METER,
+            radius: 16.0 / UNITS_PER_METER,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState {
+            crouching: true,
+            ..Default::default()
+        };
+        let input = AccumulatedInput::default();
+        let transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        handle_box3d_crouching(&runtime, &cfg, &mut state, &input, &transform);
+
+        assert!(state.crouching);
     }
 
     #[test]
@@ -4109,6 +4229,64 @@ mod tests {
     }
 
     #[test]
+    fn grounded_character_steps_up_16_unit_stair() {
+        const UNITS_PER_METER: f32 = 39.37008;
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.05, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(3.0, 0.05, 3.0), box3d::ShapeDef::default());
+        let stair_height = 16.0 / UNITS_PER_METER;
+        let stair = runtime.world.create_body(box3d::BodyDef::static_at(
+            box3d::Vec3::new(0.0, stair_height * 0.5, -1.0),
+        ));
+        let _stair_shape = stair.create_box(
+            box3d::Vec3::new(2.0, stair_height * 0.5, 0.5),
+            box3d::ShapeDef::default(),
+        );
+        let cfg = Box3dCharacterController {
+            height: 72.0 / UNITS_PER_METER,
+            crouch_height: 36.0 / UNITS_PER_METER,
+            radius: 16.0 / UNITS_PER_METER,
+            ..Default::default()
+        };
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_Z * 4.3,
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        for _ in 0..3 {
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                1.0 / 60.0,
+            );
+        }
+
+        assert!(transform.translation.z < -0.1, "{transform:?}");
+        assert!(
+            transform.translation.y > cfg.height * 0.5 + stair_height * 0.8,
+            "{transform:?}"
+        );
+    }
+
+    #[test]
     fn movement_slides_across_adjacent_wall_colliders() {
         let runtime = Box3dRuntime::new(AhoyBox3dConfig {
             gravity: Vec3::ZERO,
@@ -4366,6 +4544,56 @@ mod tests {
         let feet_y = transform.translation.y - cfg.height * 0.5;
         assert!(feet_y >= -0.0001, "{transform:?}");
         assert!(state.velocity.y <= 0.0001, "{:?}", state.velocity);
+    }
+
+    #[test]
+    fn angled_ceiling_does_not_redirect_jump_velocity_sideways() {
+        let planes = [box3d::CollisionPlane::rigid(box3d::Plane {
+            normal: box3d::Vec3::new(0.70710677, -0.70710677, 0.0),
+            offset: 0.0,
+        })];
+
+        let clipped = clip_box3d_kcc_vector(Vec3::Y * 4.0, &planes);
+
+        assert!(clipped.length_squared() <= 1.0e-8, "{clipped:?}");
+
+        let moving = clip_box3d_kcc_vector(Vec3::new(1.0, 4.0, 0.0), &planes);
+        assert!(moving.abs_diff_eq(Vec3::X, 0.0001), "{moving:?}");
+    }
+
+    #[test]
+    fn low_sloped_contact_does_not_block_upward_jump_velocity() {
+        const UNITS_PER_METER: f32 = 39.37008;
+        let cfg = Box3dCharacterController {
+            height: 57.6 / UNITS_PER_METER,
+            crouch_height: 36.0 / UNITS_PER_METER,
+            radius: 16.0 / UNITS_PER_METER,
+            ..Default::default()
+        };
+        let state = Box3dCharacterControllerState::default();
+        let character_center = cfg.height * 0.5;
+        let clip_normal = box3d_kcc_contact_normal(
+            &cfg,
+            &state,
+            Vec3::Y * (48.0 / UNITS_PER_METER - character_center),
+            Vec3::new(0.70710677, -0.70710677, 0.0),
+        );
+        let planes = [box3d::CollisionPlane::rigid(box3d::Plane {
+            normal: to_box3d_vec3(clip_normal),
+            offset: 0.0,
+        })];
+
+        let clipped = clip_box3d_kcc_vector(Vec3::Y * 4.0, &planes);
+
+        assert!(clipped.abs_diff_eq(Vec3::Y * 4.0, 0.0001), "{clipped:?}");
+
+        let head_normal = box3d_kcc_contact_normal(
+            &cfg,
+            &state,
+            Vec3::Y * (52.0 / UNITS_PER_METER - character_center),
+            Vec3::new(0.70710677, -0.70710677, 0.0),
+        );
+        assert!(head_normal.y < -0.01, "{head_normal:?}");
     }
 
     #[test]
