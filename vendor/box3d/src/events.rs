@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, slice};
+use std::{marker::PhantomData, mem::ManuallyDrop, slice};
 
 use box3d_sys as sys;
 
@@ -76,6 +76,12 @@ impl BodyId {
         handle::is_body_valid(self.raw)
     }
 
+    /// Borrows this body from `world`, if the id is still valid and belongs to it.
+    pub fn in_world(self, world: &World) -> Option<ManuallyDrop<crate::Body<'_>>> {
+        (self.is_valid() && self.raw.world0 + 1 == world.raw().index1)
+            .then(|| ManuallyDrop::new(crate::Body::from_raw(self.raw)))
+    }
+
     pub fn destroy(self) {
         handle::destroy_body(self.raw);
     }
@@ -88,6 +94,12 @@ impl BodyId {
     pub fn set_transform(self, position: Vec3, rotation: crate::Quat) {
         assert!(self.is_valid());
         unsafe { sys::b3Body_SetTransform(self.raw, position.into(), rotation.into()) };
+    }
+
+    pub fn set_target_transform(self, target: Transform, time_step: f32, wake: bool) {
+        assert!(self.is_valid());
+        assert!(time_step.is_finite() && time_step > 0.0);
+        unsafe { sys::b3Body_SetTargetTransform(self.raw, target.into(), time_step, wake) };
     }
 
     pub fn body_type(self) -> crate::BodyType {

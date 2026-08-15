@@ -102,8 +102,11 @@ impl Plugin for AhoyBox3dPlugin {
             .register_type::<Box3dCharacterControllerState>()
             .register_type::<Box3dCastHit>()
             .register_type::<Box3dMantleState>()
+            .register_type::<Box3dArticulatedPickupConfig>()
             .add_message::<Box3dPickupInput>()
             .init_resource::<Box3dPickupDebugState>()
+            .init_resource::<Box3dPickupConstraints>()
+            .init_resource::<Box3dArticulatedPickupConfig>()
             .insert_resource(self.config)
             .insert_non_send_resource(Box3dRuntime::new(self.config))
             .configure_sets(self.schedule, AhoyBox3dSystems::Tick)
@@ -363,6 +366,113 @@ pub struct Box3dHolding {
     pub body: Entity,
     pub local_point: Vec3,
 }
+
+/// Opts an articulated body into solver-joint pickup behavior.
+#[derive(Clone, Copy, Debug, Default, Component)]
+pub struct Box3dArticulatedPickup {
+    pub region: Box3dArticulatedPickupRegion,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Box3dArticulatedPickupRegion {
+    #[default]
+    Pelvis,
+    Torso,
+    Head,
+    UpperArm,
+    ForearmHand,
+    Thigh,
+    Shin,
+    Foot,
+}
+
+/// Inspector-tunable solver settings for articulated (ragdoll) pickups.
+/// Changes take effect the next time a body is grabbed.
+#[derive(Clone, Copy, Debug, Reflect, Resource)]
+#[reflect(Resource)]
+pub struct Box3dArticulatedPickupConfig {
+    /// Spring responsiveness. Lower values feel softer and lag farther behind.
+    pub spring_hz: f32,
+    /// Spring damping: 1.0 is critically damped; lower values add bounce.
+    pub damping_ratio: f32,
+    /// Maximum pull force in newtons. Increase this if distal limbs cannot lift the ragdoll.
+    pub max_force: f32,
+    pub pelvis_spring_hz_scale: f32,
+    pub torso_spring_hz_scale: f32,
+    pub head_spring_hz_scale: f32,
+    pub upper_arm_spring_hz_scale: f32,
+    pub forearm_hand_spring_hz_scale: f32,
+    pub thigh_spring_hz_scale: f32,
+    pub shin_spring_hz_scale: f32,
+    pub foot_spring_hz_scale: f32,
+    pub pelvis_force_scale: f32,
+    pub torso_force_scale: f32,
+    pub head_force_scale: f32,
+    pub upper_arm_force_scale: f32,
+    pub forearm_hand_force_scale: f32,
+    pub thigh_force_scale: f32,
+    pub shin_force_scale: f32,
+    pub foot_force_scale: f32,
+}
+
+impl Default for Box3dArticulatedPickupConfig {
+    fn default() -> Self {
+        Self {
+            spring_hz: 3.0,
+            damping_ratio: 1.0,
+            max_force: 2_500.0,
+            pelvis_spring_hz_scale: 1.0,
+            torso_spring_hz_scale: 1.0,
+            head_spring_hz_scale: 1.0,
+            upper_arm_spring_hz_scale: 4.0,
+            forearm_hand_spring_hz_scale: 6.0,
+            thigh_spring_hz_scale: 2.0,
+            shin_spring_hz_scale: 2.0,
+            foot_spring_hz_scale: 2.0,
+            pelvis_force_scale: 1.0,
+            torso_force_scale: 1.0,
+            head_force_scale: 1.25,
+            upper_arm_force_scale: 6.0,
+            forearm_hand_force_scale: 7.0,
+            thigh_force_scale: 1.25,
+            shin_force_scale: 5.0,
+            foot_force_scale: 3.5,
+        }
+    }
+}
+
+impl Box3dArticulatedPickupConfig {
+    fn spring_hz_scale(&self, region: Box3dArticulatedPickupRegion) -> f32 {
+        match region {
+            Box3dArticulatedPickupRegion::Pelvis => self.pelvis_spring_hz_scale,
+            Box3dArticulatedPickupRegion::Torso => self.torso_spring_hz_scale,
+            Box3dArticulatedPickupRegion::Head => self.head_spring_hz_scale,
+            Box3dArticulatedPickupRegion::UpperArm => self.upper_arm_spring_hz_scale,
+            Box3dArticulatedPickupRegion::ForearmHand => self.forearm_hand_spring_hz_scale,
+            Box3dArticulatedPickupRegion::Thigh => self.thigh_spring_hz_scale,
+            Box3dArticulatedPickupRegion::Shin => self.shin_spring_hz_scale,
+            Box3dArticulatedPickupRegion::Foot => self.foot_spring_hz_scale,
+        }
+        .max(0.0)
+    }
+
+    fn force_scale(&self, region: Box3dArticulatedPickupRegion) -> f32 {
+        match region {
+            Box3dArticulatedPickupRegion::Pelvis => self.pelvis_force_scale,
+            Box3dArticulatedPickupRegion::Torso => self.torso_force_scale,
+            Box3dArticulatedPickupRegion::Head => self.head_force_scale,
+            Box3dArticulatedPickupRegion::UpperArm => self.upper_arm_force_scale,
+            Box3dArticulatedPickupRegion::ForearmHand => self.forearm_hand_force_scale,
+            Box3dArticulatedPickupRegion::Thigh => self.thigh_force_scale,
+            Box3dArticulatedPickupRegion::Shin => self.shin_force_scale,
+            Box3dArticulatedPickupRegion::Foot => self.foot_force_scale,
+        }
+        .max(0.0)
+    }
+}
+
+#[derive(Default, Resource)]
+struct Box3dPickupConstraints(HashMap<Entity, box3d::BodyId>);
 
 /// Debug points for the active pickup ray and spring target.
 #[derive(Clone, Copy, Debug, Default, Resource)]
@@ -893,6 +1003,9 @@ fn sync_box3d_velocity_changes(
 fn handle_box3d_pickup_input(
     mut commands: Commands,
     runtime: NonSend<Box3dRuntime>,
+    mut constraints: ResMut<Box3dPickupConstraints>,
+    articulated_config: Res<Box3dArticulatedPickupConfig>,
+    articulated_bodies: Query<&Box3dArticulatedPickup>,
     mut inputs: MessageReader<Box3dPickupInput>,
     mut actors: Query<(
         &mut Box3dPickupActor,
@@ -937,6 +1050,34 @@ fn handle_box3d_pickup_input(
                 actor.preferred_distance = ray_origin.distance(hit_point);
                 debug.hit_point = Some(hit_point);
                 debug.target_point = Some(hit_point);
+                if let Ok(articulated) = articulated_bodies.get(body_entity) {
+                    let target = runtime
+                    .world()
+                    .create_body(box3d::BodyDef::kinematic_at(to_box3d_vec3(hit_point)));
+                    let target_id = target.id();
+                    let Some(held_body) = body.in_world(runtime.world()) else {
+                        continue;
+                    };
+                    let mut joint_def = box3d::DistanceJointDef::new(&target, &held_body);
+                    joint_def.base.local_frame_a.p = box3d::Vec3::ZERO;
+                    joint_def.base.local_frame_b.p = to_box3d_vec3(
+                        body_rotation.inverse() * (hit_point - body_position),
+                    );
+                    joint_def.length = 0.0;
+                    joint_def.enable_spring = true;
+                    joint_def.hertz = articulated_config.spring_hz.max(0.0)
+                        * articulated_config.spring_hz_scale(articulated.region);
+                    joint_def.damping_ratio = articulated_config.damping_ratio.max(0.0);
+                    let max_force = articulated_config.max_force.max(0.0)
+                        * articulated_config.force_scale(articulated.region);
+                    joint_def.lower_spring_force = -max_force;
+                    joint_def.upper_spring_force = max_force;
+                    let joint = runtime.world().create_distance_joint(joint_def);
+                    // The native world owns these handles for the pickup.
+                    std::mem::forget(joint);
+                    std::mem::forget(target);
+                    constraints.0.insert(input.actor, target_id);
+                }
                 commands.entity(input.actor).insert(Box3dHolding {
                     body: body_entity,
                     local_point: body_rotation.inverse() * (hit_point - body_position),
@@ -953,6 +1094,11 @@ fn handle_box3d_pickup_input(
                     continue;
                 };
                 let ray_direction = box3d_pickup_forward(look);
+                if let Some(target) = constraints.0.remove(&input.actor)
+                    && target.is_valid()
+                {
+                    target.destroy();
+                }
                 if input.action == Box3dPickupAction::Throw
                     && let Some(body) = runtime.body(holding.body)
                     && body.is_valid()
@@ -971,7 +1117,9 @@ fn handle_box3d_pickup_input(
 fn update_box3d_pickup_holds(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
+    mut constraints: ResMut<Box3dPickupConstraints>,
     actors: Query<(
+        Entity,
         &Box3dPickupActor,
         &Transform,
         &CharacterLook,
@@ -985,7 +1133,15 @@ fn update_box3d_pickup_holds(
     if delta <= 0.0 {
         return;
     }
-    for (actor, transform, look, controller, state, holding) in &actors {
+    let active_actors: HashSet<_> = actors.iter().map(|values| values.0).collect();
+    constraints.0.retain(|actor, target| {
+        let keep = active_actors.contains(actor) && target.is_valid();
+        if !keep && target.is_valid() {
+            target.destroy();
+        }
+        keep
+    });
+    for (actor_entity, actor, transform, look, controller, state, holding) in &actors {
         if state.noclip {
             continue;
         }
@@ -998,6 +1154,44 @@ fn update_box3d_pickup_holds(
         let target = box3d_pickup_eye_position(transform, controller, state)
             + box3d_pickup_forward(look) * actor.preferred_distance.max(0.0);
         debug.target_point = Some(target);
+        if let Some(target_body) = constraints.0.get(&actor_entity).copied()
+            && target_body.is_valid()
+        {
+            target_body.set_target_transform(
+                box3d::Transform::new(to_box3d_vec3(target), box3d::Quat::IDENTITY),
+                delta,
+                true,
+            );
+        } else {
+            let Some(body_transform) = body.transform() else {
+                continue;
+            };
+            let body_position = from_box3d_vec3(body_transform.p);
+            let body_rotation = from_box3d_quat(body_transform.q);
+            let anchor = body_position + body_rotation * holding.local_point;
+            let anchor_velocity =
+                from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(anchor)));
+            let error = target - anchor;
+            let hold_hz = actor.hold_hz.max(0.0);
+            let inverse_mass = body.inverse_mass();
+            if inverse_mass <= 0.0 || hold_hz <= 0.0 {
+                continue;
+            }
+            let desired_acceleration = (error * (hold_hz * hold_hz)
+                - anchor_velocity * (2.0 * hold_hz))
+                .clamp_length_max(actor.max_hold_acceleration.max(0.0));
+            if let Some(impulse) = box3d_point_impulse_for_velocity_change(
+                body,
+                anchor,
+                desired_acceleration * delta,
+            ) {
+                body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(anchor), true);
+            }
+
+            let angular_velocity = from_box3d_vec3(body.angular_velocity());
+            let damping = 1.0 + actor.hold_angular_damping.max(0.0) * delta;
+            body.set_angular_velocity(to_box3d_vec3(angular_velocity / damping));
+        }
         let Some(body_transform) = body.transform() else {
             continue;
         };
@@ -1005,25 +1199,6 @@ fn update_box3d_pickup_holds(
         let body_rotation = from_box3d_quat(body_transform.q);
         let anchor = body_position + body_rotation * holding.local_point;
         debug.hit_point = Some(anchor);
-        let anchor_velocity = from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(anchor)));
-        let error = target - anchor;
-        let hold_hz = actor.hold_hz.max(0.0);
-        let inverse_mass = body.inverse_mass();
-        if inverse_mass <= 0.0 || hold_hz <= 0.0 {
-            continue;
-        }
-        let desired_acceleration = (error * (hold_hz * hold_hz)
-            - anchor_velocity * (2.0 * hold_hz))
-            .clamp_length_max(actor.max_hold_acceleration.max(0.0));
-        if let Some(impulse) =
-            box3d_point_impulse_for_velocity_change(body, anchor, desired_acceleration * delta)
-        {
-            body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(anchor), true);
-        }
-
-        let angular_velocity = from_box3d_vec3(body.angular_velocity());
-        let damping = 1.0 + actor.hold_angular_damping.max(0.0) * delta;
-        body.set_angular_velocity(to_box3d_vec3(angular_velocity / damping));
     }
 }
 
