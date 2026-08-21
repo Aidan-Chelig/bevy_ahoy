@@ -647,6 +647,7 @@ pub struct Box3dCharacterControllerState {
     pub velocity: Vec3,
     pub platform_velocity: Vec3,
     pub platform_angular_velocity: Vec3,
+    pub platform_velocity_inherited: bool,
     pub grounded: Option<Box3dCastHit>,
     pub crouching: bool,
     pub tac_velocity: f32,
@@ -668,6 +669,7 @@ impl Default for Box3dCharacterControllerState {
             velocity: Vec3::ZERO,
             platform_velocity: Vec3::ZERO,
             platform_angular_velocity: Vec3::ZERO,
+            platform_velocity_inherited: false,
             grounded: None,
             crouching: false,
             tac_velocity: 0.0,
@@ -2189,6 +2191,8 @@ fn handle_box3d_jump(
     wish_velocity: Vec3,
     delta: f32,
 ) {
+    let mut inherited_platform_velocity = Vec3::ZERO;
+    let mut inherits_platform_velocity = false;
     let jump_direction =
         if state.grounded.is_none() && state.last_ground.elapsed() > cfg.coyote_time {
             let Some(direction) =
@@ -2206,14 +2210,19 @@ fn handle_box3d_jump(
             }
             state.grounded = None;
             state.last_ground.set_elapsed(cfg.coyote_time);
+            inherited_platform_velocity = state.platform_velocity;
+            inherits_platform_velocity = true;
             Vec3::Y
         };
 
     input.jumped = None;
     input.tac = None;
     state.last_tac.reset();
-    state.velocity += jump_direction * (2.0 * cfg.gravity * cfg.jump_height).sqrt()
-        + Vec3::Y * state.platform_velocity.y;
+    state.velocity +=
+        jump_direction * (2.0 * cfg.gravity * cfg.jump_height).sqrt() + inherited_platform_velocity;
+    state.platform_velocity_inherited |= inherits_platform_velocity;
+    state.platform_velocity = Vec3::ZERO;
+    state.platform_angular_velocity = Vec3::ZERO;
     if let Some(crane_input) = input.craned.as_mut() {
         crane_input.tick((cfg.crane_input_buffer - cfg.jump_crane_chain_time).max(Duration::ZERO));
     }
@@ -2896,6 +2905,21 @@ fn update_box3d_grounded(
         );
     }
     state.grounded = new_ground;
+    convert_landing_velocity_to_platform_relative(
+        state,
+        old_ground.is_none() && new_ground.is_some(),
+    );
+}
+
+fn convert_landing_velocity_to_platform_relative(
+    state: &mut Box3dCharacterControllerState,
+    landed: bool,
+) {
+    if !landed || !state.platform_velocity_inherited {
+        return;
+    }
+    state.velocity -= state.platform_velocity;
+    state.platform_velocity_inherited = false;
 }
 
 fn overlap_box3d_ground(
@@ -4456,6 +4480,87 @@ mod tests {
         assert!(state.mantle.is_some());
         assert_eq!(state.velocity, Vec3::ZERO);
         assert!(input.jumped.is_some());
+    }
+
+    #[test]
+    fn grounded_jump_inherits_full_platform_velocity_once() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let cfg = Box3dCharacterController::default();
+        let platform_velocity = Vec3::new(4.0, 1.5, -3.0);
+        let initial_velocity = Vec3::new(0.5, 0.0, 0.25);
+        let mut state = Box3dCharacterControllerState {
+            velocity: initial_velocity,
+            platform_velocity,
+            platform_angular_velocity: Vec3::Y,
+            grounded: Some(Box3dCastHit {
+                entity: Some(Entity::from_bits(42)),
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut input = AccumulatedInput {
+            jumped: Some(Stopwatch::new()),
+            ..Default::default()
+        };
+
+        handle_box3d_jump(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &Transform::default(),
+            Vec3::ZERO,
+            1.0 / 60.0,
+        );
+
+        let jump_impulse = Vec3::Y * (2.0 * cfg.gravity * cfg.jump_height).sqrt();
+        assert!(
+            state
+                .velocity
+                .abs_diff_eq(initial_velocity + platform_velocity + jump_impulse, 0.0001)
+        );
+        assert_eq!(state.platform_velocity, Vec3::ZERO);
+        assert_eq!(state.platform_angular_velocity, Vec3::ZERO);
+        assert!(state.platform_velocity_inherited);
+        assert!(state.grounded.is_none());
+        assert!(input.jumped.is_none());
+    }
+
+    #[test]
+    fn landing_converts_inherited_world_velocity_back_to_platform_relative() {
+        let platform_velocity = Vec3::new(4.0, 1.5, -3.0);
+        let relative_velocity = Vec3::new(0.5, -8.0, 0.25);
+        let mut state = Box3dCharacterControllerState {
+            velocity: relative_velocity + platform_velocity,
+            platform_velocity,
+            platform_velocity_inherited: true,
+            ..Default::default()
+        };
+
+        convert_landing_velocity_to_platform_relative(&mut state, true);
+
+        assert!(state.velocity.abs_diff_eq(relative_velocity, 0.0001));
+        assert!(!state.platform_velocity_inherited);
+    }
+
+    #[test]
+    fn ordinary_ground_contact_does_not_remove_platform_velocity() {
+        let velocity = Vec3::new(0.5, -8.0, 0.25);
+        let mut state = Box3dCharacterControllerState {
+            velocity,
+            platform_velocity: Vec3::new(4.0, 1.5, -3.0),
+            ..Default::default()
+        };
+
+        convert_landing_velocity_to_platform_relative(&mut state, true);
+
+        assert_eq!(state.velocity, velocity);
     }
 
     #[test]
