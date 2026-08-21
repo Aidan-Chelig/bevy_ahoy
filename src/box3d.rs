@@ -1732,26 +1732,46 @@ fn box3d_ground_move(
     delta: f32,
 ) {
     state.velocity.y = 0.0;
-    state.velocity += state.platform_velocity;
+    let relative_velocity = state.velocity;
+    let relative_tac_velocity = state.tac_velocity;
+
+    // Carry the rider in a separate pass from their self-driven movement.
+    // Collision clipping operates on `state.velocity`; clipping the combined
+    // rider + platform velocity and then subtracting the platform velocity can
+    // manufacture a large opposite relative velocity when a fast platform is
+    // blocked by geometry.
+    let mut platform_movement = state.platform_velocity * delta;
+    platform_movement.y = 0.0;
+    if platform_movement.length_squared() > f32::EPSILON {
+        state.velocity = state.platform_velocity;
+        box3d_move_and_slide(
+            runtime,
+            cfg,
+            state,
+            output,
+            transform,
+            platform_movement,
+        );
+        state.velocity = relative_velocity;
+        state.tac_velocity = relative_tac_velocity;
+    }
+
     let mut movement = state.velocity * delta;
     movement.y = 0.0;
 
     if movement.length_squared() <= f32::EPSILON {
-        state.velocity -= state.platform_velocity;
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
 
     if cast_box3d_character(runtime, cfg, state, transform.translation, movement).is_none() {
         transform.translation += movement;
-        state.velocity -= state.platform_velocity;
         depenetrate_box3d_character(runtime, cfg, state, transform);
         snap_box3d_to_ground(runtime, cfg, state, transform);
         return;
     }
 
     box3d_step_move(runtime, cfg, state, output, transform, movement);
-    state.velocity -= state.platform_velocity;
     snap_box3d_to_ground(runtime, cfg, state, transform);
 }
 
@@ -1790,6 +1810,8 @@ fn update_box3d_crane_state(
     input.tac = None;
     state.mantle = None;
     state.grounded = None;
+    state.platform_velocity = Vec3::ZERO;
+    state.platform_angular_velocity = Vec3::ZERO;
     state.crane_height_left = Some(crane_height);
 }
 
@@ -2909,6 +2931,13 @@ fn update_box3d_grounded(
         state,
         old_ground.is_none() && new_ground.is_some(),
     );
+    if old_ground.is_none()
+        && new_ground.is_none()
+        && state.last_ground.elapsed() > cfg.coyote_time
+    {
+        state.platform_velocity = Vec3::ZERO;
+        state.platform_angular_velocity = Vec3::ZERO;
+    }
 }
 
 fn convert_landing_velocity_to_platform_relative(
@@ -3521,6 +3550,149 @@ mod tests {
 
         assert!((transform.translation.x + 2.0).abs() < 0.1, "{transform:?}");
         assert!(transform.translation.z.abs() < 0.1, "{transform:?}");
+    }
+
+    #[test]
+    fn walking_speed_is_not_multiplied_on_rotating_platform() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            sub_steps: 8,
+        });
+        let platform_entity = Entity::from_bits(100);
+        let shape_entity = Entity::from_bits(101);
+        let platform = runtime
+            .world
+            .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::ZERO));
+        let platform_shape = platform.create_box(
+            box3d::Vec3::new(5.0, 0.25, 5.0),
+            box3d::ShapeDef::default(),
+        );
+        let platform_id = platform.id();
+        let platform_shape_id = platform_shape.id();
+        std::mem::forget(platform_shape);
+        std::mem::forget(platform);
+        runtime.register_body_id(platform_entity, platform_id);
+        runtime.register_shape_id(shape_entity, platform_entity, platform_shape_id);
+
+        let cfg = Box3dCharacterController::default();
+        let delta = 1.0 / 60.0;
+        let walking_speed = 1.0;
+        let mut state = Box3dCharacterControllerState::default();
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(2.0, 0.25 + cfg.height * 0.5, -1.0);
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+        assert!(state.grounded.is_some());
+
+        let steps = 60;
+        for step in 1..=steps {
+            let rotation = Quat::from_rotation_y(
+                std::f32::consts::FRAC_PI_2 * step as f32 / steps as f32,
+            );
+            platform_id.set_target_transform(
+                box3d::Transform::new(box3d::Vec3::ZERO, to_box3d_quat(rotation)),
+                delta,
+                true,
+            );
+            state.velocity = rotation * Vec3::NEG_Z * walking_speed;
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+            runtime.world.step(delta, 8);
+            update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+            assert!(state.grounded.is_some(), "lost platform at step {step}");
+        }
+
+        let platform_local = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).inverse()
+            * transform.translation;
+        assert!((platform_local.x - 2.0).abs() < 0.08, "{platform_local:?}");
+        assert!((platform_local.z + 2.0).abs() < 0.08, "{platform_local:?}");
+    }
+
+    #[test]
+    fn blocked_platform_transport_does_not_launch_rider_opposite_platform() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            sub_steps: 8,
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.25, 0.0)));
+        let floor_shape = floor.create_box(
+            box3d::Vec3::new(8.0, 0.25, 8.0),
+            box3d::ShapeDef::default(),
+        );
+        let wall = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.0, -1.5)));
+        let wall_shape = wall.create_box(
+            box3d::Vec3::new(8.0, 1.0, 0.25),
+            box3d::ShapeDef::default(),
+        );
+
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::X,
+            platform_velocity: Vec3::new(0.0, 0.0, -252.0),
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        box3d_ground_move(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            1.0 / 60.0,
+        );
+
+        assert!(state.velocity.abs_diff_eq(Vec3::X, 1.0e-5), "{:?}", state.velocity);
+        assert!(state.tac_velocity < 1.0e-5, "{}", state.tac_velocity);
+        assert!(transform.translation.z > -1.5, "{transform:?}");
+
+        std::mem::forget(wall_shape);
+        std::mem::forget(floor_shape);
+    }
+
+    #[test]
+    fn airborne_controller_discards_platform_velocity_after_coyote_time() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            sub_steps: 8,
+        });
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState {
+            platform_velocity: Vec3::new(0.0, -39.0, -125.0),
+            platform_angular_velocity: Vec3::Y,
+            ..Default::default()
+        };
+        state
+            .last_ground
+            .set_elapsed(cfg.coyote_time + Duration::from_millis(1));
+
+        update_box3d_grounded(
+            &runtime,
+            &cfg,
+            &mut state,
+            &Transform::IDENTITY,
+            1.0 / 60.0,
+        );
+
+        assert_eq!(state.platform_velocity, Vec3::ZERO);
+        assert_eq!(state.platform_angular_velocity, Vec3::ZERO);
     }
 
     #[test]
