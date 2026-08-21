@@ -2887,7 +2887,13 @@ fn update_box3d_grounded(
     let new_ground = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
 
     if let Some(platform_hit) = new_ground.or(old_ground) {
-        update_box3d_platform_velocity(runtime, state, platform_hit);
+        update_box3d_platform_velocity(
+            runtime,
+            state,
+            platform_hit,
+            transform.translation,
+            delta,
+        );
     }
     state.grounded = new_ground;
 }
@@ -2930,6 +2936,8 @@ fn update_box3d_platform_velocity(
     runtime: &Box3dRuntime,
     state: &mut Box3dCharacterControllerState,
     ground: Box3dCastHit,
+    rider_position: Vec3,
+    delta: f32,
 ) {
     let Some(collider_entity) = ground.entity else {
         state.platform_velocity = Vec3::ZERO;
@@ -2947,9 +2955,37 @@ fn update_box3d_platform_velocity(
         return;
     };
 
-    state.platform_velocity =
-        from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(ground.point)));
-    state.platform_angular_velocity = from_box3d_vec3(body.angular_velocity());
+    let angular_velocity = from_box3d_vec3(body.angular_velocity());
+    let rotation = body
+        .transform()
+        .map(|transform| from_box3d_quat(transform.q))
+        .unwrap_or(Quat::IDENTITY);
+    state.platform_velocity = rigid_point_velocity(
+        rider_position,
+        from_box3d_vec3(body.world_center_of_mass()),
+        rotation,
+        from_box3d_vec3(body.linear_velocity()),
+        angular_velocity,
+        delta,
+    );
+    state.platform_angular_velocity = angular_velocity;
+}
+
+fn rigid_point_velocity(
+    point: Vec3,
+    center_of_mass: Vec3,
+    rotation: Quat,
+    linear_velocity: Vec3,
+    angular_velocity: Vec3,
+    delta: f32,
+) -> Vec3 {
+    if !delta.is_finite() || delta <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let local_point = rotation.inverse() * (point - center_of_mass);
+    let next_rotation = (Quat::from_scaled_axis(angular_velocity * delta) * rotation).normalize();
+    let next_point = center_of_mass + linear_velocity * delta + next_rotation * local_point;
+    (next_point - point) / delta
 }
 
 fn update_box3d_water(
@@ -3404,6 +3440,64 @@ fn validate_box3d_velocity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_remains_grounded_through_rotating_platform_half_turn() {
+        let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            sub_steps: 8,
+        });
+        let platform_entity = Entity::from_bits(100);
+        let shape_entity = Entity::from_bits(101);
+        let platform = runtime
+            .world
+            .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::ZERO));
+        let platform_shape = platform.create_box(
+            box3d::Vec3::new(5.0, 0.25, 5.0),
+            box3d::ShapeDef::default(),
+        );
+        let platform_id = platform.id();
+        let platform_shape_id = platform_shape.id();
+        std::mem::forget(platform_shape);
+        std::mem::forget(platform);
+        runtime.register_body_id(platform_entity, platform_id);
+        runtime.register_shape_id(shape_entity, platform_entity, platform_shape_id);
+
+        let cfg = Box3dCharacterController::default();
+        let delta = 1.0 / 60.0;
+        let mut state = Box3dCharacterControllerState::default();
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(2.0, 0.25 + cfg.height * 0.5, 0.0);
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+        assert!(state.grounded.is_some());
+
+        let steps = 65;
+        for step in 1..=steps {
+            let degrees = 180.0 * step as f32 / steps as f32;
+            platform_id.set_target_transform(
+                box3d::Transform::new(
+                    box3d::Vec3::ZERO,
+                    to_box3d_quat(Quat::from_rotation_y(degrees.to_radians())),
+                ),
+                delta,
+                true,
+            );
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                delta,
+            );
+            runtime.world.step(delta, 8);
+            update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
+            assert!(state.grounded.is_some(), "lost platform at {degrees} degrees: {transform:?}");
+        }
+
+        assert!((transform.translation.x + 2.0).abs() < 0.1, "{transform:?}");
+        assert!(transform.translation.z.abs() < 0.1, "{transform:?}");
+    }
 
     #[test]
     fn box3d_defaults_track_avian_controller_defaults() {
