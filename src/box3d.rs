@@ -1054,17 +1054,16 @@ fn handle_box3d_pickup_input(
                 debug.target_point = Some(hit_point);
                 if let Ok(articulated) = articulated_bodies.get(body_entity) {
                     let target = runtime
-                    .world()
-                    .create_body(box3d::BodyDef::kinematic_at(to_box3d_vec3(hit_point)));
+                        .world()
+                        .create_body(box3d::BodyDef::kinematic_at(to_box3d_vec3(hit_point)));
                     let target_id = target.id();
                     let Some(held_body) = body.in_world(runtime.world()) else {
                         continue;
                     };
                     let mut joint_def = box3d::DistanceJointDef::new(&target, &held_body);
                     joint_def.base.local_frame_a.p = box3d::Vec3::ZERO;
-                    joint_def.base.local_frame_b.p = to_box3d_vec3(
-                        body_rotation.inverse() * (hit_point - body_position),
-                    );
+                    joint_def.base.local_frame_b.p =
+                        to_box3d_vec3(body_rotation.inverse() * (hit_point - body_position));
                     joint_def.length = 0.0;
                     joint_def.enable_spring = true;
                     joint_def.hertz = articulated_config.spring_hz.max(0.0)
@@ -1171,8 +1170,7 @@ fn update_box3d_pickup_holds(
             let body_position = from_box3d_vec3(body_transform.p);
             let body_rotation = from_box3d_quat(body_transform.q);
             let anchor = body_position + body_rotation * holding.local_point;
-            let anchor_velocity =
-                from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(anchor)));
+            let anchor_velocity = from_box3d_vec3(body.world_point_velocity(to_box3d_vec3(anchor)));
             let error = target - anchor;
             let hold_hz = actor.hold_hz.max(0.0);
             let inverse_mass = body.inverse_mass();
@@ -1182,11 +1180,9 @@ fn update_box3d_pickup_holds(
             let desired_acceleration = (error * (hold_hz * hold_hz)
                 - anchor_velocity * (2.0 * hold_hz))
                 .clamp_length_max(actor.max_hold_acceleration.max(0.0));
-            if let Some(impulse) = box3d_point_impulse_for_velocity_change(
-                body,
-                anchor,
-                desired_acceleration * delta,
-            ) {
+            if let Some(impulse) =
+                box3d_point_impulse_for_velocity_change(body, anchor, desired_acceleration * delta)
+            {
                 body.apply_linear_impulse(to_box3d_vec3(impulse), to_box3d_vec3(anchor), true);
             }
 
@@ -1744,14 +1740,7 @@ fn box3d_ground_move(
     platform_movement.y = 0.0;
     if platform_movement.length_squared() > f32::EPSILON {
         state.velocity = state.platform_velocity;
-        box3d_move_and_slide(
-            runtime,
-            cfg,
-            state,
-            output,
-            transform,
-            platform_movement,
-        );
+        box3d_move_and_slide(runtime, cfg, state, output, transform, platform_movement);
         state.velocity = relative_velocity;
         state.tac_velocity = relative_tac_velocity;
     }
@@ -1765,10 +1754,21 @@ fn box3d_ground_move(
     }
 
     if cast_box3d_character(runtime, cfg, state, transform.translation, movement).is_none() {
+        let original_position = transform.translation;
         transform.translation += movement;
         depenetrate_box3d_character(runtime, cfg, state, transform);
-        snap_box3d_to_ground(runtime, cfg, state, transform);
-        return;
+        let direction = movement.normalize_or_zero();
+        let achieved_progress = (transform.translation - original_position).dot(direction);
+        if achieved_progress + cfg.skin_width >= movement.length() {
+            snap_box3d_to_ground(runtime, cfg, state, transform);
+            return;
+        }
+
+        // A sharp stair edge can evade the capsule cast at near-tangent
+        // angles, only to be discovered by overlap recovery after moving.
+        // Retry from the original position through the explicit step path
+        // instead of keeping the backwards depenetration shove.
+        transform.translation = original_position;
     }
 
     box3d_step_move(runtime, cfg, state, output, transform, movement);
@@ -2004,9 +2004,12 @@ fn update_box3d_mantle_state(
 
     let hand_radius = (cfg.min_ledge_grab_space.x.max(cfg.min_ledge_grab_space.z) * 0.5).max(0.01);
     let inward_distance = cfg.radius + cfg.skin_width + cfg.min_ledge_grab_space.z * 0.5;
-    let probe_start = transform.translation + Vec3::Y * (cfg.height * 0.5 + cfg.mantle_height)
-        - *wall_normal * inward_distance;
-    let probe_distance = cfg.height + cfg.mantle_height;
+    // `mantle_height` is the hand probe's reach above the controller origin,
+    // matching Ahoy's Avian controller. Adding the body height here made the
+    // Box3D port able to grab ledges more than a full extra character tall.
+    let probe_start =
+        transform.translation + Vec3::Y * cfg.mantle_height - *wall_normal * inward_distance;
+    let probe_distance = cfg.mantle_height;
     let Some(ledge_hit) = cast_box3d_sphere(
         runtime,
         probe_start,
@@ -2022,7 +2025,11 @@ fn update_box3d_mantle_state(
 
     let feet_y = transform.translation.y - cfg.height * 0.5;
     let ledge_height = ledge_hit.point.y - feet_y;
-    if ledge_height <= cfg.step_size || ledge_height > cfg.height + cfg.mantle_height {
+    let max_ledge_height = cfg.height * 0.5 + cfg.mantle_height;
+    let min_ledge_height = (cfg.height - cfg.climb_pull_up_height).max(cfg.step_size);
+    if ledge_height + cfg.skin_width < min_ledge_height
+        || ledge_height > max_ledge_height + cfg.skin_width
+    {
         return;
     }
     let target_position = Vec3::new(
@@ -2627,12 +2634,7 @@ fn box3d_move_and_slide(
         };
 
         push_box3d_touch(output, &hit, transform.translation, state.velocity);
-        let clip_normal = box3d_kcc_contact_normal(
-            cfg,
-            state,
-            hit.point,
-            hit.normal,
-        );
+        let clip_normal = box3d_kcc_contact_normal(cfg, state, hit.point, hit.normal);
         if remaining.dot(clip_normal) >= -1.0e-4 {
             transform.translation += remaining;
             break;
@@ -2704,8 +2706,7 @@ fn box3d_kcc_contact_normal(
     if normal.y >= -0.01 {
         return normal;
     }
-    let upper_sphere_center =
-        from_box3d_vec3(box3d_character_points(cfg, state.crouching)[1]).y;
+    let upper_sphere_center = from_box3d_vec3(box3d_character_points(cfg, state.crouching)[1]).y;
     let head_contact_limit = upper_sphere_center + cfg.radius * 0.5 - cfg.skin_width;
     if contact_point.y >= head_contact_limit {
         return normal;
@@ -2779,49 +2780,52 @@ fn box3d_step_move(
     state.tac_velocity = original_tac_velocity;
     output.touching_entities = original_touching_entities;
 
-    let up = Vec3::Y * cfg.step_size;
-    let up_hit = cast_box3d_character(runtime, cfg, state, transform.translation, up);
-    let overhead_hit = up_hit.filter(|hit| hit.normal.y < -0.01);
-    if overhead_hit.is_some_and(|hit| hit.distance < cfg.step_size) {
+    // Lift one skin width beyond the maximum accepted stair height. Raising
+    // by exactly `step_size` leaves the capsule tangent to a maximum-height
+    // tread, so the subsequent horizontal cast can still clip against its
+    // sharp edge and bleed speed.
+    let step_clearance = cfg.step_size + cfg.skin_width;
+    let up = Vec3::Y * step_clearance;
+    let up_distance = cast_box3d_character(runtime, cfg, state, transform.translation, up)
+        .map(|hit| hit.distance)
+        .unwrap_or(step_clearance);
+    transform.translation.y += up_distance;
+
+    // Match Ahoy's original step algorithm: after raising the character,
+    // verify that there is enough forward clearance to actually stand on the
+    // candidate step. This is a clearance cast, not an offset for the later
+    // landing probe.
+    let ledge_clearance = movement.normalize_or_zero() * cfg.min_step_ledge_space;
+    if cast_box3d_character(runtime, cfg, state, transform.translation, ledge_clearance).is_some() {
         transform.translation = down_position;
         state.velocity = down_velocity;
         state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     }
-    let up_distance = overhead_hit
-        .map(|hit| hit.distance)
-        .unwrap_or(cfg.step_size);
-    transform.translation.y += up_distance;
 
     box3d_move_and_slide(runtime, cfg, state, output, transform, movement);
 
-    let down = Vec3::NEG_Y * cfg.step_size;
-    let landing_probe = transform.translation
-        + movement.normalize_or_zero() * cfg.min_step_ledge_space;
-    let Some(down_hit) = cast_box3d_character(runtime, cfg, state, landing_probe, down)
-    else {
+    let down = Vec3::NEG_Y * step_clearance;
+    let down_hit = cast_box3d_character(runtime, cfg, state, transform.translation, down)
+        .filter(|hit| hit.normal.y >= cfg.min_walk_cos)
+        .or_else(|| cast_box3d_flat_foot_ground(runtime, cfg, state, transform, step_clearance));
+    let Some(down_hit) = down_hit else {
         transform.translation = down_position;
         state.velocity = down_velocity;
         state.tac_velocity = down_tac_velocity;
         output.touching_entities = down_touching_entities;
         return;
     };
-    if down_hit.normal.y < cfg.min_walk_cos {
-        transform.translation = down_position;
-        state.velocity = down_velocity;
-        state.tac_velocity = down_tac_velocity;
-        output.touching_entities = down_touching_entities;
-        return;
-    }
 
     transform.translation.y -= down_hit.distance;
     depenetrate_box3d_character(runtime, cfg, state, transform);
     let up_position = transform.translation;
+    let stepped_height = up_position.y - original_position.y;
     let down_dist = down_position.xz().distance_squared(original_position.xz());
     let up_dist = up_position.xz().distance_squared(original_position.xz());
 
-    if down_dist > up_dist + 1.0e-8 {
+    if stepped_height > cfg.step_size + cfg.skin_width || down_dist > up_dist + 1.0e-8 {
         transform.translation = down_position;
         state.velocity = down_velocity;
         state.tac_velocity = down_tac_velocity;
@@ -2906,7 +2910,7 @@ fn update_box3d_grounded(
     } else {
         cfg.ground_distance
     };
-    let hit = cast_box3d_character(
+    let capsule_hit = cast_box3d_character(
         runtime,
         cfg,
         state,
@@ -2915,29 +2919,96 @@ fn update_box3d_grounded(
     )
     .or_else(|| overlap_box3d_ground(runtime, cfg, state, transform.translation));
     let old_ground = state.grounded;
-    let new_ground = hit.filter(|hit| hit.normal.y >= cfg.min_walk_cos);
+    let new_ground = capsule_hit
+        .filter(|hit| hit.normal.y >= cfg.min_walk_cos)
+        .or_else(|| cast_box3d_flat_foot_ground(runtime, cfg, state, transform, cast_distance));
 
     if let Some(platform_hit) = new_ground.or(old_ground) {
-        update_box3d_platform_velocity(
-            runtime,
-            state,
-            platform_hit,
-            transform.translation,
-            delta,
-        );
+        update_box3d_platform_velocity(runtime, state, platform_hit, transform.translation, delta);
     }
     state.grounded = new_ground;
     convert_landing_velocity_to_platform_relative(
         state,
         old_ground.is_none() && new_ground.is_some(),
     );
-    if old_ground.is_none()
-        && new_ground.is_none()
-        && state.last_ground.elapsed() > cfg.coyote_time
+    if old_ground.is_none() && new_ground.is_none() && state.last_ground.elapsed() > cfg.coyote_time
     {
         state.platform_velocity = Vec3::ZERO;
         state.platform_angular_velocity = Vec3::ZERO;
     }
+}
+
+/// Probe the character's circular footprint as a flat sole.
+///
+/// The movement hull remains a capsule so walls and corners stay smooth, but
+/// a capsule's rounded bottom produces a diagonal, unwalkable normal when it
+/// lands partly on a platform edge. A real character controller should remain
+/// supported while any meaningful part of its sole overlaps the platform.
+fn cast_box3d_flat_foot_ground(
+    runtime: &Box3dRuntime,
+    cfg: &Box3dCharacterController,
+    state: &Box3dCharacterControllerState,
+    transform: &Transform,
+    cast_distance: f32,
+) -> Option<Box3dCastHit> {
+    let probe_radius = (cfg.skin_width * 0.5).max(0.001);
+    let footprint_radius = (cfg.radius - cfg.skin_width - probe_radius).max(0.0);
+    let feet_y = transform.translation.y - cfg.height * 0.5;
+    let start_y = feet_y + cfg.ground_distance + probe_radius;
+    let movement = Vec3::NEG_Y * (cfg.ground_distance + cast_distance + probe_radius);
+    let distance = movement.length();
+    let points = [box3d::Vec3::ZERO];
+    let proxy = box3d::ShapeProxy::new(&points, probe_radius).ok()?;
+    let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+    let offsets = [
+        Vec3::ZERO,
+        Vec3::X,
+        Vec3::Z,
+        Vec3::NEG_X,
+        Vec3::NEG_Z,
+        Vec3::new(diagonal, 0.0, diagonal),
+        Vec3::new(-diagonal, 0.0, diagonal),
+        Vec3::new(-diagonal, 0.0, -diagonal),
+        Vec3::new(diagonal, 0.0, -diagonal),
+    ];
+    let mut closest = None;
+
+    for offset in offsets {
+        let origin = Vec3::new(
+            transform.translation.x + offset.x * footprint_radius,
+            start_y,
+            transform.translation.z + offset.z * footprint_radius,
+        );
+        runtime.world.cast_shape(
+            to_box3d_vec3(origin),
+            proxy,
+            to_box3d_vec3(movement),
+            box3d::QueryFilter::default(),
+            |hit| {
+                if box3d_state_holds_shape(runtime, state, hit.shape.id()) {
+                    return 1.0;
+                }
+                let normal = from_box3d_vec3(hit.normal).normalize_or_zero();
+                if normal.y < cfg.min_walk_cos {
+                    return 1.0;
+                }
+                let collision_distance = hit.fraction * distance;
+                if closest.as_ref().is_none_or(|current: &Box3dCastHit| {
+                    collision_distance < current.collision_distance
+                }) {
+                    closest = Some(Box3dCastHit {
+                        entity: runtime.shape_entity(hit.shape.id()),
+                        distance: (collision_distance - cfg.ground_distance).max(0.0),
+                        point: from_box3d_vec3(hit.point),
+                        normal,
+                        collision_distance,
+                    });
+                }
+                hit.fraction
+            },
+        );
+    }
+    closest
 }
 
 fn convert_landing_velocity_to_platform_relative(
@@ -3155,10 +3226,7 @@ fn clamp_box3d_velocity_to_crouch_speed(
     state.velocity.z = clamped.y;
 }
 
-fn set_box3d_horizontal_velocity(
-    state: &mut Box3dCharacterControllerState,
-    velocity: Vec3,
-) {
+fn set_box3d_horizontal_velocity(state: &mut Box3dCharacterControllerState, velocity: Vec3) {
     state.velocity.x = velocity.x;
     state.velocity.z = velocity.z;
 }
@@ -3505,10 +3573,8 @@ mod tests {
         let platform = runtime
             .world
             .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::ZERO));
-        let platform_shape = platform.create_box(
-            box3d::Vec3::new(5.0, 0.25, 5.0),
-            box3d::ShapeDef::default(),
-        );
+        let platform_shape =
+            platform.create_box(box3d::Vec3::new(5.0, 0.25, 5.0), box3d::ShapeDef::default());
         let platform_id = platform.id();
         let platform_shape_id = platform_shape.id();
         std::mem::forget(platform_shape);
@@ -3545,7 +3611,10 @@ mod tests {
             );
             runtime.world.step(delta, 8);
             update_box3d_grounded(&runtime, &cfg, &mut state, &transform, delta);
-            assert!(state.grounded.is_some(), "lost platform at {degrees} degrees: {transform:?}");
+            assert!(
+                state.grounded.is_some(),
+                "lost platform at {degrees} degrees: {transform:?}"
+            );
         }
 
         assert!((transform.translation.x + 2.0).abs() < 0.1, "{transform:?}");
@@ -3563,10 +3632,8 @@ mod tests {
         let platform = runtime
             .world
             .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::ZERO));
-        let platform_shape = platform.create_box(
-            box3d::Vec3::new(5.0, 0.25, 5.0),
-            box3d::ShapeDef::default(),
-        );
+        let platform_shape =
+            platform.create_box(box3d::Vec3::new(5.0, 0.25, 5.0), box3d::ShapeDef::default());
         let platform_id = platform.id();
         let platform_shape_id = platform_shape.id();
         std::mem::forget(platform_shape);
@@ -3585,9 +3652,8 @@ mod tests {
 
         let steps = 60;
         for step in 1..=steps {
-            let rotation = Quat::from_rotation_y(
-                std::f32::consts::FRAC_PI_2 * step as f32 / steps as f32,
-            );
+            let rotation =
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 * step as f32 / steps as f32);
             platform_id.set_target_transform(
                 box3d::Transform::new(box3d::Vec3::ZERO, to_box3d_quat(rotation)),
                 delta,
@@ -3607,8 +3673,8 @@ mod tests {
             assert!(state.grounded.is_some(), "lost platform at step {step}");
         }
 
-        let platform_local = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).inverse()
-            * transform.translation;
+        let platform_local =
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).inverse() * transform.translation;
         assert!((platform_local.x - 2.0).abs() < 0.08, "{platform_local:?}");
         assert!((platform_local.z + 2.0).abs() < 0.08, "{platform_local:?}");
     }
@@ -3622,17 +3688,13 @@ mod tests {
         let floor = runtime
             .world
             .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.25, 0.0)));
-        let floor_shape = floor.create_box(
-            box3d::Vec3::new(8.0, 0.25, 8.0),
-            box3d::ShapeDef::default(),
-        );
+        let floor_shape =
+            floor.create_box(box3d::Vec3::new(8.0, 0.25, 8.0), box3d::ShapeDef::default());
         let wall = runtime
             .world
             .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, 1.0, -1.5)));
-        let wall_shape = wall.create_box(
-            box3d::Vec3::new(8.0, 1.0, 0.25),
-            box3d::ShapeDef::default(),
-        );
+        let wall_shape =
+            wall.create_box(box3d::Vec3::new(8.0, 1.0, 0.25), box3d::ShapeDef::default());
 
         let cfg = Box3dCharacterController::default();
         let mut state = Box3dCharacterControllerState {
@@ -3659,7 +3721,11 @@ mod tests {
             1.0 / 60.0,
         );
 
-        assert!(state.velocity.abs_diff_eq(Vec3::X, 1.0e-5), "{:?}", state.velocity);
+        assert!(
+            state.velocity.abs_diff_eq(Vec3::X, 1.0e-5),
+            "{:?}",
+            state.velocity
+        );
         assert!(state.tac_velocity < 1.0e-5, "{}", state.tac_velocity);
         assert!(transform.translation.z > -1.5, "{transform:?}");
 
@@ -3683,13 +3749,7 @@ mod tests {
             .last_ground
             .set_elapsed(cfg.coyote_time + Duration::from_millis(1));
 
-        update_box3d_grounded(
-            &runtime,
-            &cfg,
-            &mut state,
-            &Transform::IDENTITY,
-            1.0 / 60.0,
-        );
+        update_box3d_grounded(&runtime, &cfg, &mut state, &Transform::IDENTITY, 1.0 / 60.0);
 
         assert_eq!(state.platform_velocity, Vec3::ZERO);
         assert_eq!(state.platform_angular_velocity, Vec3::ZERO);
@@ -3739,7 +3799,13 @@ mod tests {
 
         assert!((state.velocity.xz().length() - 3.0).abs() < 0.0001);
         assert_eq!(state.velocity.y, -2.0);
-        assert!(state.velocity.xz().normalize().abs_diff_eq(Vec2::new(0.6, 0.8), 0.0001));
+        assert!(
+            state
+                .velocity
+                .xz()
+                .normalize()
+                .abs_diff_eq(Vec2::new(0.6, 0.8), 0.0001)
+        );
     }
 
     #[test]
@@ -4009,9 +4075,13 @@ mod tests {
         });
         let clearance = 32.0 / UNITS_PER_METER;
         let ceiling_thickness = 2.0 / UNITS_PER_METER;
-        let ceiling = runtime.world.create_body(box3d::BodyDef::static_at(
-            box3d::Vec3::new(0.0, clearance + ceiling_thickness * 0.5, 0.0),
-        ));
+        let ceiling = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                0.0,
+                clearance + ceiling_thickness * 0.5,
+                0.0,
+            )));
         let _ceiling_shape = ceiling.create_box(
             box3d::Vec3::new(1.0, ceiling_thickness * 0.5, 1.0),
             box3d::ShapeDef::default(),
@@ -4551,6 +4621,44 @@ mod tests {
     }
 
     #[test]
+    fn mantle_probe_rejects_ledge_above_configured_reach() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let cfg = Box3dCharacterController::default();
+        let feet_y = 0.0;
+        let unreachable_top = feet_y + cfg.height * 0.5 + cfg.mantle_height + 0.1;
+        let ledge = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                0.0,
+                unreachable_top * 0.5,
+                -1.0,
+            )));
+        let _ledge_shape = ledge.create_box(
+            box3d::Vec3::new(2.0, unreachable_top * 0.5, 0.25),
+            box3d::ShapeDef::default(),
+        );
+        let mut state = Box3dCharacterControllerState::default();
+        let mut input = AccumulatedInput {
+            mantled: Some(Stopwatch::new()),
+            ..Default::default()
+        };
+
+        update_box3d_mantle_state(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut input,
+            &Transform::from_xyz(0.0, cfg.height * 0.5, 0.0),
+            Vec3::NEG_Z * cfg.speed,
+        );
+
+        assert!(state.mantle.is_none());
+    }
+
+    #[test]
     fn climbdown_enters_mantle_from_empty_ledge() {
         let mut runtime = Box3dRuntime::new(AhoyBox3dConfig {
             gravity: Vec3::ZERO,
@@ -4787,9 +4895,13 @@ mod tests {
         let _floor_shape =
             floor.create_box(box3d::Vec3::new(3.0, 0.05, 3.0), box3d::ShapeDef::default());
         let stair_height = 16.0 / UNITS_PER_METER;
-        let stair = runtime.world.create_body(box3d::BodyDef::static_at(
-            box3d::Vec3::new(0.0, stair_height * 0.5, -1.0),
-        ));
+        let stair = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                0.0,
+                stair_height * 0.5,
+                -1.0,
+            )));
         let _stair_shape = stair.create_box(
             box3d::Vec3::new(2.0, stair_height * 0.5, 0.5),
             box3d::ShapeDef::default(),
@@ -4829,6 +4941,126 @@ mod tests {
         assert!(
             transform.translation.y > cfg.height * 0.5 + stair_height * 0.8,
             "{transform:?}"
+        );
+        assert!(
+            state.velocity.z <= -4.3 * 0.99,
+            "step reduced forward speed: {:?}",
+            state.velocity
+        );
+    }
+
+    #[test]
+    fn stair_above_step_height_does_not_teleport_character_upward() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.05, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(3.0, 0.05, 3.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let stair_height = cfg.step_size + 0.05;
+        let stair = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                0.0,
+                stair_height * 0.5,
+                -1.0,
+            )));
+        let _stair_shape = stair.create_box(
+            box3d::Vec3::new(2.0, stair_height * 0.5, 0.5),
+            box3d::ShapeDef::default(),
+        );
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_Z * cfg.speed,
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let starting_height = cfg.height * 0.5;
+        let mut transform = Transform::from_xyz(0.0, starting_height, -0.35);
+
+        box3d_ground_move(
+            &runtime,
+            &cfg,
+            &mut state,
+            &mut output,
+            &mut transform,
+            1.0 / 60.0,
+        );
+
+        assert!(
+            (transform.translation.y - starting_height).abs() <= cfg.skin_width,
+            "character was incorrectly raised: {transform:?}"
+        );
+    }
+
+    #[test]
+    fn near_maximum_stair_height_does_not_bleed_horizontal_speed() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let floor = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.05, 0.0)));
+        let _floor_shape =
+            floor.create_box(box3d::Vec3::new(3.0, 0.05, 3.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let stair_height = cfg.step_size - cfg.skin_width * 0.5;
+        let stair = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(
+                0.0,
+                stair_height * 0.5,
+                -1.0,
+            )));
+        let _stair_shape = stair.create_box(
+            box3d::Vec3::new(2.0, stair_height * 0.5, 0.5),
+            box3d::ShapeDef::default(),
+        );
+        let approach_speed = 4.3;
+        let mut state = Box3dCharacterControllerState {
+            velocity: Vec3::NEG_Z * approach_speed,
+            grounded: Some(Box3dCastHit {
+                entity: None,
+                distance: 0.0,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                collision_distance: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut output = CharacterControllerOutput::default();
+        let mut transform = Transform::from_xyz(0.0, cfg.height * 0.5, 0.0);
+
+        for _ in 0..12 {
+            box3d_ground_move(
+                &runtime,
+                &cfg,
+                &mut state,
+                &mut output,
+                &mut transform,
+                1.0 / 60.0,
+            );
+        }
+
+        assert!(
+            transform.translation.y > cfg.height * 0.5 + stair_height * 0.9,
+            "failed to step onto near-maximum stair: {transform:?}"
+        );
+        assert!(
+            state.velocity.z <= -approach_speed * 0.99,
+            "step reduced forward speed: {:?}",
+            state.velocity
         );
     }
 
@@ -5333,6 +5565,29 @@ mod tests {
 
         assert!(state.grounded.is_some(), "{state:?}");
         let ground = state.grounded.unwrap();
+        assert!(ground.normal.y >= cfg.min_walk_cos, "{ground:?}");
+    }
+
+    #[test]
+    fn flat_foot_probe_supports_partial_platform_edge_landings() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let platform = runtime
+            .world
+            .create_body(box3d::BodyDef::static_at(box3d::Vec3::new(0.0, -0.1, 0.0)));
+        let _platform_shape =
+            platform.create_box(box3d::Vec3::new(0.5, 0.1, 2.0), box3d::ShapeDef::default());
+        let cfg = Box3dCharacterController::default();
+        let mut state = Box3dCharacterControllerState::default();
+        let transform = Transform::from_xyz(0.9, cfg.height * 0.5, 0.0);
+
+        update_box3d_grounded(&runtime, &cfg, &mut state, &transform, 1.0 / 60.0);
+
+        let ground = state
+            .grounded
+            .expect("flat foot should overlap the platform");
         assert!(ground.normal.y >= cfg.min_walk_cos, "{ground:?}");
     }
 
