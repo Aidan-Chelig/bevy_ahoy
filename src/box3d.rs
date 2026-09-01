@@ -108,7 +108,7 @@ impl Plugin for AhoyBox3dPlugin {
             .init_resource::<Box3dPickupConstraints>()
             .init_resource::<Box3dArticulatedPickupConfig>()
             .insert_resource(self.config)
-            .insert_non_send_resource(Box3dRuntime::new(self.config))
+            .insert_non_send(Box3dRuntime::new(self.config))
             .configure_sets(self.schedule, AhoyBox3dSystems::Tick)
             .add_systems(
                 self.schedule,
