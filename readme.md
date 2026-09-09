@@ -135,7 +135,7 @@ bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["box3
 The Box3D backend does not use `PhysicsPlugins`. Instead, add the usual Bevy and
 input plugins plus Ahoy's Box3D runtime/input/camera plugins:
 
-```rust
+```rust,ignore
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
 use bevy_ahoy::{
@@ -228,7 +228,7 @@ By default, `AhoyBox3dPlugin::default()` runs Box3D in `FixedUpdate`. You can
 override this when physics needs to run inside another schedule, such as
 `bevy_ggrs::GgrsSchedule`:
 
-```rust
+```rust,ignore
 use bevy_ahoy::box3d::prelude::*;
 
 app.add_plugins(AhoyBox3dPlugin::new(bevy_ggrs::GgrsSchedule));

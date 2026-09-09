@@ -2200,9 +2200,9 @@ dependencies = [
 
 [[package]]
 name = "box3d-sys"
-version = "0.1.16"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d740be8e5442308729c636bf81e4d5aa4f93657e6cb62b60af36b04062de58a7"
+checksum = "6a05d0af85625c81ed0fb02ce759caa23d31db2cb8688d99626fb76ac20f70df"
 dependencies = [
  "bindgen",
  "cmake",
