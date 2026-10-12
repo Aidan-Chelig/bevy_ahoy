@@ -1135,6 +1135,10 @@ fn update_box3d_pickup_holds(
         return;
     }
     let active_actors: HashSet<_> = actors.iter().map(|values| values.0).collect();
+    if active_actors.is_empty() {
+        debug.hit_point = None;
+        debug.target_point = None;
+    }
     constraints.0.retain(|actor, target| {
         let keep = active_actors.contains(actor) && target.is_valid();
         if !keep && target.is_valid() {
