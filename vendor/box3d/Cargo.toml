@@ -52,4 +52,4 @@ name = "shapes"
 path = "examples/shapes.rs"
 
 [dependencies.box3d-sys]
-version = "0.1.15"
+version = "=0.1.15"

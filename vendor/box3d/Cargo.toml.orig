@@ -11,4 +11,4 @@ repository = "https://github.com/Tebarem/box3d-rs"
 default = []
 
 [dependencies]
-box3d-sys = { path = "..", version = "0.1.15" }
+box3d-sys = { path = "..", version = "=0.1.15" }
