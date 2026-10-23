@@ -1325,7 +1325,7 @@ fn run_box3d_kcc(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
     waters: Query<(Entity, &Box3dWater), Without<Box3dCharacterController>>,
-    ladders: Query<(&Box3dLadder, &Transform), Without<Box3dCharacterController>>,
+    ladders: Query<(Entity, &Box3dLadder), Without<Box3dCharacterController>>,
     mut spatial: ParamSet<(
         TransformHelper,
         Query<(
@@ -1340,7 +1340,7 @@ fn run_box3d_kcc(
     )>,
 ) {
     // Resolve from current local transforms, not the render-frame globals:
-    // water owners can move during a fixed tick or gameplay rollback.
+    // volume owners can move during a fixed tick or gameplay rollback.
     let water_frames = {
         let transforms = spatial.p0();
         waters
@@ -1350,6 +1350,18 @@ fn run_box3d_kcc(
                     .compute_global_transform(entity)
                     .ok()
                     .map(|frame| (*water, frame))
+            })
+            .collect::<Vec<_>>()
+    };
+    let ladder_frames = {
+        let transforms = spatial.p0();
+        ladders
+            .iter()
+            .filter_map(|(entity, ladder)| {
+                transforms
+                    .compute_global_transform(entity)
+                    .ok()
+                    .map(|frame| (*ladder, frame))
             })
             .collect::<Vec<_>>()
     };
@@ -1381,7 +1393,7 @@ fn run_box3d_kcc(
         }
         update_box3d_water(cfg, &state, &transform, &water_frames, &mut water);
         let on_ladder = water.level <= WaterLevel::Feet
-            && box3d_character_touches_ladder(cfg, &state, &transform, &ladders);
+            && box3d_character_touches_ladder(cfg, &state, &transform, &ladder_frames);
         if water.level > WaterLevel::Feet {
             state.grounded = None;
         }
@@ -3187,7 +3199,7 @@ fn box3d_character_touches_ladder(
     cfg: &Box3dCharacterController,
     state: &Box3dCharacterControllerState,
     transform: &Transform,
-    ladders: &Query<(&Box3dLadder, &Transform), Without<Box3dCharacterController>>,
+    ladders: &[(Box3dLadder, GlobalTransform)],
 ) -> bool {
     let feet = transform.translation + Vec3::NEG_Y * (cfg.height * 0.5 - cfg.ground_distance);
     let active_height = if state.crouching {
@@ -3213,11 +3225,11 @@ fn box3d_character_touches_ladder(
 
 fn box3d_ladder_contains(
     ladder: &Box3dLadder,
-    transform: &Transform,
+    transform: &GlobalTransform,
     character_radius: f32,
     point: Vec3,
 ) -> bool {
-    let local_point = transform.compute_affine().inverse().transform_point3(point);
+    let local_point = transform.affine().inverse().transform_point3(point);
     let half_extents = ladder.half_extents + Vec3::new(character_radius, 0.0, character_radius);
     local_point.abs().cmple(half_extents).all()
 }
@@ -4267,7 +4279,7 @@ mod tests {
     #[test]
     fn ladder_volume_includes_character_radius() {
         let ladder = Box3dLadder::cuboid(Vec3::new(0.05, 1.0, 0.5));
-        let transform = Transform::from_xyz(0.0, 1.0, 0.0);
+        let transform = GlobalTransform::from(Transform::from_xyz(0.0, 1.0, 0.0));
 
         assert!(box3d_ladder_contains(
             &ladder,
