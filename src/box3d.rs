@@ -21,7 +21,10 @@ use bevy_math::Vec2;
 use bevy_math::{Dir3, Mat3, Quat, Vec3, Vec3Swizzles};
 use bevy_reflect::Reflect;
 use bevy_time::{Stopwatch, Time};
-use bevy_transform::prelude::Transform;
+use bevy_transform::{
+    helper::TransformHelper,
+    prelude::{GlobalTransform, Transform},
+};
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 
@@ -1321,19 +1324,37 @@ fn writeback_box3d_transforms(
 fn run_box3d_kcc(
     runtime: NonSend<Box3dRuntime>,
     time: Res<Time>,
-    waters: Query<(&Box3dWater, &Transform), Without<Box3dCharacterController>>,
+    waters: Query<(Entity, &Box3dWater), Without<Box3dCharacterController>>,
     ladders: Query<(&Box3dLadder, &Transform), Without<Box3dCharacterController>>,
-    mut characters: Query<(
-        &Box3dCharacterController,
-        &mut Box3dCharacterControllerState,
-        &mut AccumulatedInput,
-        &CharacterLook,
-        &mut WaterState,
-        &mut CharacterControllerOutput,
-        &mut Transform,
+    mut spatial: ParamSet<(
+        TransformHelper,
+        Query<(
+            &Box3dCharacterController,
+            &mut Box3dCharacterControllerState,
+            &mut AccumulatedInput,
+            &CharacterLook,
+            &mut WaterState,
+            &mut CharacterControllerOutput,
+            &mut Transform,
+        )>,
     )>,
 ) {
+    // Resolve from current local transforms, not the render-frame globals:
+    // water owners can move during a fixed tick or gameplay rollback.
+    let water_frames = {
+        let transforms = spatial.p0();
+        waters
+            .iter()
+            .filter_map(|(entity, water)| {
+                transforms
+                    .compute_global_transform(entity)
+                    .ok()
+                    .map(|frame| (*water, frame))
+            })
+            .collect::<Vec<_>>()
+    };
     let delta = time.delta_secs();
+    let mut characters = spatial.p1();
     for (cfg, mut state, mut input, look, mut water, mut output, mut transform) in &mut characters {
         prepare_box3d_kcc_tick(&time, &mut state, &mut output);
 
@@ -1358,7 +1379,7 @@ fn run_box3d_kcc(
         if started_crouching && state.grounded.is_some() {
             clamp_box3d_velocity_to_crouch_speed(cfg, &mut state);
         }
-        update_box3d_water(cfg, &state, &transform, &waters, &mut water);
+        update_box3d_water(cfg, &state, &transform, &water_frames, &mut water);
         let on_ladder = water.level <= WaterLevel::Feet
             && box3d_character_touches_ladder(cfg, &state, &transform, &ladders);
         if water.level > WaterLevel::Feet {
@@ -3120,7 +3141,7 @@ fn update_box3d_water(
     cfg: &Box3dCharacterController,
     state: &Box3dCharacterControllerState,
     transform: &Transform,
-    waters: &Query<(&Box3dWater, &Transform), Without<Box3dCharacterController>>,
+    waters: &[(Box3dWater, GlobalTransform)],
     water_state: &mut WaterState,
 ) {
     water_state.level = WaterLevel::None;
@@ -3157,8 +3178,8 @@ fn update_box3d_water(
     }
 }
 
-fn box3d_water_contains(water: &Box3dWater, transform: &Transform, point: Vec3) -> bool {
-    let local_point = transform.compute_affine().inverse().transform_point3(point);
+fn box3d_water_contains(water: &Box3dWater, transform: &GlobalTransform, point: Vec3) -> bool {
+    let local_point = transform.affine().inverse().transform_point3(point);
     local_point.abs().cmple(water.half_extents).all()
 }
 
@@ -4233,12 +4254,12 @@ mod tests {
 
         assert!(box3d_water_contains(
             &water,
-            &transform,
+            &GlobalTransform::from(transform),
             transform.transform_point(Vec3::new(1.5, 0.75, 0.25))
         ));
         assert!(!box3d_water_contains(
             &water,
-            &transform,
+            &GlobalTransform::from(transform),
             transform.transform_point(Vec3::new(2.1, 0.0, 0.0))
         ));
     }
