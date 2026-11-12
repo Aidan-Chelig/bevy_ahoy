@@ -13,7 +13,14 @@ include = ["/src", "/license*", "/examples", "/vendor/box3d"]
 
 [features]
 default = ["avian", "pickup"]
-serialize = ["dep:serde", "avian3d?/serialize", "bevy_math/serialize", "avian_pickup?/serialize"]
+serialize = [
+    "dep:serde",
+    "avian3d?/serialize",
+    "bevy_ecs/serialize",
+    "bevy_math/serialize",
+    "bevy_time/serialize",
+    "avian_pickup?/serialize",
+]
 # The original Avian character controller (`AhoyPlugins`). Box3D-only users
 # turn this off so Avian and parry are not built at all.
 avian = ["dep:avian3d"]
