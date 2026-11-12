@@ -17,8 +17,7 @@ use tracing::{error, warn};
 
 use crate::{
     CharacterControllerDerivedProps, CharacterControllerOutput, CharacterControllerState,
-    CharacterLook, MantleOutput, MantleState, forward, input::AccumulatedInput, prelude::*,
-    right,
+    CharacterLook, MantleOutput, MantleState, forward, input::AccumulatedInput, prelude::*, right,
 };
 
 pub struct AhoyKccPlugin {

@@ -1,6 +1,6 @@
-use crate::prelude::*;
 #[cfg(feature = "avian")]
 use crate::CharacterControllerState;
+use crate::prelude::*;
 
 #[cfg(feature = "avian")]
 pub struct AhoyWaterPlugin;

@@ -40,9 +40,9 @@ pub mod prelude {
     #[cfg(feature = "box3d")]
     pub use crate::box3d::{
         AhoyBox3dBody, AhoyBox3dCollider, AhoyBox3dConfig, AhoyBox3dPlugin, AhoyBox3dShape,
-        AhoyBox3dSystems, AhoyBox3dVelocity, Box3dArticulatedPickup,
-        Box3dArticulatedPickupConfig, Box3dArticulatedPickupRegion, Box3dBodyType,
-        Box3dColliderShape, Box3dHolding, Box3dPickupActor, Box3dRuntime, Box3dWater,
+        AhoyBox3dSystems, AhoyBox3dVelocity, Box3dArticulatedPickup, Box3dArticulatedPickupConfig,
+        Box3dArticulatedPickupRegion, Box3dBodyType, Box3dColliderShape, Box3dHolding,
+        Box3dPickupActor, Box3dRuntime, Box3dWater,
     };
 }
 
@@ -60,15 +60,15 @@ pub use avian_pickup::{
     },
 };
 
+#[cfg(feature = "avian")]
+use crate::input::AccumulatedInput;
+use crate::prelude::*;
 pub use crate::{
     camera::AhoyCameraPlugin, fixed_update_utils::AhoyFixedUpdateUtilsPlugin,
     input::AhoyInputPlugin,
 };
 #[cfg(feature = "avian")]
 pub use crate::{dynamics::AhoyDynamicPlugin, kcc::AhoyKccPlugin, water::AhoyWaterPlugin};
-use crate::prelude::*;
-#[cfg(feature = "avian")]
-use crate::input::AccumulatedInput;
 #[cfg(feature = "avian")]
 use avian3d::character_controller::move_and_slide::MoveHitData;
 #[cfg(feature = "avian")]

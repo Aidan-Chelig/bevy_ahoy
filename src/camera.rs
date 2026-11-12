@@ -4,9 +4,9 @@ use std::{f32::consts::TAU, time::Duration};
 use avian_pickup::actor::AvianPickupActor;
 use bevy_ecs::{lifecycle::HookContext, relationship::Relationship, world::DeferredWorld};
 
-use crate::{CharacterLook, prelude::*};
 #[cfg(feature = "avian")]
 use crate::{CharacterControllerDerivedProps, CharacterControllerState, kcc::spin_character_look};
+use crate::{CharacterLook, prelude::*};
 
 #[cfg(feature = "box3d")]
 use crate::box3d::{Box3dCharacterController, Box3dCharacterControllerState};

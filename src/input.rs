@@ -7,9 +7,9 @@ use bevy_time::Stopwatch;
 use crate::CharacterControllerState;
 #[cfg(feature = "box3d")]
 use crate::box3d::{Box3dPickupAction, Box3dPickupInput, Box3dPickupInputExternallyDriven};
+use crate::prelude::*;
 #[cfg(feature = "avian")]
 use crate::{forward, right};
-use crate::prelude::*;
 
 use crate::fixed_update_utils::did_fixed_timestep_run_this_frame;
 
