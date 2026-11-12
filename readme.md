@@ -132,6 +132,18 @@ you are developing from a local checkout, use a path dependency instead:
 bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["box3d"] }
 ```
 
+Cargo features:
+
+- `avian` (default): the original Avian controller, with `AhoyPlugins`,
+  `CharacterController`, `Water` and the `minimal` and `surf` examples.
+- `pickup` (default): prop pickup through `avian_pickup`. Turns on `avian`.
+- `box3d`: the runtime and controller described in this section.
+- `serialize`: `serde` support for Ahoy's components.
+
+With `default-features = false, features = ["box3d"]` as above, Avian and parry
+are not built at all. If you turn off default features but still use the Avian
+controller, add `"avian"` to `features`.
+
 The Box3D backend does not use `PhysicsPlugins`. Instead, add the usual Bevy and
 input plugins plus Ahoy's Box3D runtime/input/camera plugins:
 
