@@ -1,4 +1,6 @@
-#![doc = include_str!("../readme.md")]
+// The readme runs as a doctest and its usage example needs the Avian
+// `CharacterController`, so it is only the crate docs with `avian`.
+#![cfg_attr(feature = "avian", doc = include_str!("../readme.md"))]
 
 /// Everything you need to get started with `bevy_ahoy`
 pub mod prelude {
@@ -93,23 +95,25 @@ mod pickup_glue;
 mod water;
 
 /// Convenience for getting the forward vector corresponding to an orientation.
+#[cfg(any(feature = "avian", feature = "box3d"))]
 #[must_use]
 pub(crate) fn forward(orientation: Quat) -> Vec3 {
     orientation * Vec3::NEG_Z
 }
 
 /// Convenience for getting the right vector corresponding to an orientation.
+#[cfg(any(feature = "avian", feature = "box3d"))]
 #[must_use]
 pub(crate) fn right(orientation: Quat) -> Vec3 {
     orientation * Vec3::X
 }
 
-#[cfg(feature = "avian")]
 /// Plugin group for Ahoy's internal plugins.
 ///
 /// It requires you to add [`PhysicsPlugins`] and [`EnhancedInputPlugin`] to work properly.
 ///
 /// Also adds [`AvianPickupPlugin`] if `pickup` feature is enabled.
+#[cfg(feature = "avian")]
 pub struct AhoyPlugins {
     schedule: Interned<dyn ScheduleLabel>,
 }
@@ -160,8 +164,8 @@ impl PluginGroup for AhoyPlugins {
     }
 }
 
-#[cfg(feature = "avian")]
 /// Plugin to setup schedule for [`AhoySystems`].
+#[cfg(feature = "avian")]
 pub struct AhoySchedulePlugin {
     pub schedule: Interned<dyn ScheduleLabel>,
 }
@@ -414,8 +418,8 @@ impl Default for CharacterControllerState {
     }
 }
 
-#[cfg(feature = "avian")]
 /// The state of a mantle in progress.
+#[cfg(feature = "avian")]
 #[derive(Clone, Reflect, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct MantleState {
@@ -429,8 +433,8 @@ fn max_stopwatch() -> Stopwatch {
     watch
 }
 
-#[cfg(feature = "avian")]
 /// Properties derived for a [`CharacterController`] that are constant for a character.
+#[cfg(feature = "avian")]
 #[derive(Component, Clone, Debug, Default)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct CharacterControllerDerivedProps {
@@ -551,7 +555,14 @@ pub struct MantleOutput {
     pub wall_entity: Entity,
 }
 
-/// Data related to a hit during [`MoveAndSlide::move_and_slide`].
+#[cfg_attr(
+    feature = "avian",
+    doc = "Data related to a hit during [`MoveAndSlide::move_and_slide`]."
+)]
+#[cfg_attr(
+    not(feature = "avian"),
+    doc = "Data related to a hit during a move and slide."
+)]
 #[derive(Clone, Reflect, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]

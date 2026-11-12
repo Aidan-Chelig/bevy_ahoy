@@ -99,3 +99,15 @@ all-features = true
 [[example]]
 name = "box3d_runtime"
 required-features = ["box3d"]
+
+[[example]]
+name = "minimal"
+required-features = ["avian"]
+
+[[example]]
+name = "playground"
+required-features = ["pickup"]
+
+[[example]]
+name = "surf"
+required-features = ["avian"]

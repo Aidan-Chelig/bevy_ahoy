@@ -180,6 +180,7 @@ pub(crate) fn sync_box3d_camera_transform(
     }
 }
 
+#[cfg(any(feature = "avian", feature = "box3d"))]
 fn sync_camera_translation(
     camera_transform: &mut Transform,
     camera: &CharacterControllerCameraOf,

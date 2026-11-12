@@ -575,8 +575,8 @@ pub struct Box3dCharacterController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Component)]
 pub struct Box3dCharacterControllerOrder(pub u64);
 
-/// Matches `Self::from(CharacterController::default())`, spelled out so the
-/// Box3D controller builds without the `avian` feature.
+/// Matches `Self::from(CharacterController::default())`, spelled out so it
+/// builds without the `avian` feature.
 impl Default for Box3dCharacterController {
     fn default() -> Self {
         Self {
