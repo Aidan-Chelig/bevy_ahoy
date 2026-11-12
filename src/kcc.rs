@@ -17,7 +17,8 @@ use tracing::{error, warn};
 
 use crate::{
     CharacterControllerDerivedProps, CharacterControllerOutput, CharacterControllerState,
-    CharacterLook, MantleOutput, MantleState, input::AccumulatedInput, prelude::*,
+    CharacterLook, MantleOutput, MantleState, forward, input::AccumulatedInput, prelude::*,
+    right,
 };
 
 pub struct AhoyKccPlugin {
@@ -1626,16 +1627,4 @@ pub(crate) fn spin_character_look(
                 * look.to_quat(),
         );
     }
-}
-
-/// Convenience for getting the forward vector corresponding to an orientation.
-#[must_use]
-pub(crate) fn forward(orientation: Quat) -> Vec3 {
-    orientation * Vec3::NEG_Z
-}
-
-/// Convenience for getting the right vector corresponding to an orientation.
-#[must_use]
-pub(crate) fn right(orientation: Quat) -> Vec3 {
-    orientation * Vec3::X
 }

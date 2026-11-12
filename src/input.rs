@@ -3,10 +3,12 @@ use avian_pickup::input::{AvianPickupAction, AvianPickupInput};
 use bevy_ecs::entity::MapEntities;
 use bevy_time::Stopwatch;
 
+#[cfg(feature = "avian")]
 use crate::CharacterControllerState;
 #[cfg(feature = "box3d")]
 use crate::box3d::{Box3dPickupAction, Box3dPickupInput, Box3dPickupInputExternallyDriven};
-use crate::kcc::{forward, right};
+#[cfg(feature = "avian")]
+use crate::{forward, right};
 use crate::prelude::*;
 
 use crate::fixed_update_utils::did_fixed_timestep_run_this_frame;
@@ -17,7 +19,6 @@ impl Plugin for AhoyInputPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(apply_movement)
             .add_observer(apply_jump)
-            .add_observer(apply_global_movement)
             .add_observer(apply_tac)
             .add_observer(apply_crouch)
             .add_observer(apply_swim_up)
@@ -31,6 +32,9 @@ impl Plugin for AhoyInputPlugin {
                     .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
             )
             .add_systems(PreUpdate, tick_timers.in_set(EnhancedInputSystems::Update));
+
+        #[cfg(feature = "avian")]
+        app.add_observer(apply_global_movement);
 
         #[cfg(any(feature = "pickup", feature = "box3d"))]
         app.add_observer(apply_drop)
@@ -128,6 +132,7 @@ fn apply_movement(
     }
 }
 
+#[cfg(feature = "avian")]
 fn apply_global_movement(
     movement: On<Fire<GlobalMovement>>,
     mut query: Query<(&mut AccumulatedInput, &CharacterControllerState)>,

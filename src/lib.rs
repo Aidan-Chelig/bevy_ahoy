@@ -2,8 +2,9 @@
 
 /// Everything you need to get started with `bevy_ahoy`
 pub mod prelude {
+    #[cfg(feature = "avian")]
+    pub(crate) use avian3d::prelude::*;
     pub(crate) use {
-        avian3d::prelude::*,
         bevy_app::prelude::*,
         bevy_derive::{Deref, DerefMut},
         bevy_ecs::prelude::*,
@@ -16,14 +17,17 @@ pub mod prelude {
     };
 
     pub use crate::{
-        AhoyPlugins, AhoySystems, CharacterController, CharacterControllerState, CharacterLook,
+        AhoySystems, CharacterLook,
         camera::{CharacterControllerCamera, CharacterControllerCameraOf},
         input::{
             Climbdown, Crane, Crouch, GlobalMovement, Jump, Mantle, Movement, RotateCamera, SwimUp,
             Tac, YankCamera,
         },
-        water::{Water, WaterLevel, WaterState},
+        water::{WaterLevel, WaterState},
     };
+
+    #[cfg(feature = "avian")]
+    pub use crate::{AhoyPlugins, CharacterController, CharacterControllerState, water::Water};
 
     #[cfg(any(feature = "pickup", feature = "box3d"))]
     pub use crate::input::{DropObject, PullObject, ThrowObject};
@@ -55,28 +59,52 @@ pub use avian_pickup::{
 };
 
 pub use crate::{
-    camera::AhoyCameraPlugin, dynamics::AhoyDynamicPlugin,
-    fixed_update_utils::AhoyFixedUpdateUtilsPlugin, input::AhoyInputPlugin, kcc::AhoyKccPlugin,
-    water::AhoyWaterPlugin,
+    camera::AhoyCameraPlugin, fixed_update_utils::AhoyFixedUpdateUtilsPlugin,
+    input::AhoyInputPlugin,
 };
-use crate::{input::AccumulatedInput, prelude::*};
+#[cfg(feature = "avian")]
+pub use crate::{dynamics::AhoyDynamicPlugin, kcc::AhoyKccPlugin, water::AhoyWaterPlugin};
+use crate::prelude::*;
+#[cfg(feature = "avian")]
+use crate::input::AccumulatedInput;
+#[cfg(feature = "avian")]
 use avian3d::character_controller::move_and_slide::MoveHitData;
+#[cfg(feature = "avian")]
 use bevy_app::PluginGroupBuilder;
-use bevy_ecs::{entity::MapEntities, intern::Interned, schedule::ScheduleLabel};
+use bevy_ecs::entity::MapEntities;
+#[cfg(feature = "avian")]
+use bevy_ecs::{intern::Interned, schedule::ScheduleLabel};
+#[cfg(feature = "avian")]
 use bevy_time::Stopwatch;
+#[cfg(feature = "avian")]
 use core::time::Duration;
 
 #[cfg(feature = "box3d")]
 pub mod box3d;
 pub mod camera;
+#[cfg(feature = "avian")]
 mod dynamics;
 mod fixed_update_utils;
 pub mod input;
+#[cfg(feature = "avian")]
 mod kcc;
 #[cfg(feature = "pickup")]
 mod pickup_glue;
 mod water;
 
+/// Convenience for getting the forward vector corresponding to an orientation.
+#[must_use]
+pub(crate) fn forward(orientation: Quat) -> Vec3 {
+    orientation * Vec3::NEG_Z
+}
+
+/// Convenience for getting the right vector corresponding to an orientation.
+#[must_use]
+pub(crate) fn right(orientation: Quat) -> Vec3 {
+    orientation * Vec3::X
+}
+
+#[cfg(feature = "avian")]
 /// Plugin group for Ahoy's internal plugins.
 ///
 /// It requires you to add [`PhysicsPlugins`] and [`EnhancedInputPlugin`] to work properly.
@@ -86,6 +114,7 @@ pub struct AhoyPlugins {
     schedule: Interned<dyn ScheduleLabel>,
 }
 
+#[cfg(feature = "avian")]
 impl AhoyPlugins {
     /// Create a new plugin group in the given schedule. The default is [`FixedPostUpdate`].
     pub fn new(schedule: impl ScheduleLabel) -> Self {
@@ -95,6 +124,7 @@ impl AhoyPlugins {
     }
 }
 
+#[cfg(feature = "avian")]
 impl Default for AhoyPlugins {
     fn default() -> Self {
         Self {
@@ -103,6 +133,7 @@ impl Default for AhoyPlugins {
     }
 }
 
+#[cfg(feature = "avian")]
 impl PluginGroup for AhoyPlugins {
     fn build(self) -> PluginGroupBuilder {
         let plugin = PluginGroupBuilder::start::<Self>()
@@ -129,11 +160,13 @@ impl PluginGroup for AhoyPlugins {
     }
 }
 
+#[cfg(feature = "avian")]
 /// Plugin to setup schedule for [`AhoySystems`].
 pub struct AhoySchedulePlugin {
     pub schedule: Interned<dyn ScheduleLabel>,
 }
 
+#[cfg(feature = "avian")]
 impl Plugin for AhoySchedulePlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(
@@ -155,6 +188,7 @@ pub enum AhoySystems {
     ApplyForcesToDynamicRigidBodies,
 }
 
+#[cfg(feature = "avian")]
 #[derive(Component, Clone, Reflect, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
@@ -227,6 +261,7 @@ pub struct CharacterController {
     pub climb_sensitivity: f32,
 }
 
+#[cfg(feature = "avian")]
 impl Default for CharacterController {
     fn default() -> Self {
         Self {
@@ -332,6 +367,7 @@ impl CharacterLook {
     }
 }
 
+#[cfg(feature = "avian")]
 #[derive(Component, Clone, Reflect, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
@@ -358,6 +394,7 @@ pub struct CharacterControllerState {
     pub mantle: Option<MantleState>,
 }
 
+#[cfg(feature = "avian")]
 impl Default for CharacterControllerState {
     fn default() -> Self {
         Self {
@@ -377,6 +414,7 @@ impl Default for CharacterControllerState {
     }
 }
 
+#[cfg(feature = "avian")]
 /// The state of a mantle in progress.
 #[derive(Clone, Reflect, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
@@ -384,12 +422,14 @@ pub struct MantleState {
     pub height_left: f32,
 }
 
+#[cfg(feature = "avian")]
 fn max_stopwatch() -> Stopwatch {
     let mut watch = Stopwatch::new();
     watch.set_elapsed(Duration::MAX);
     watch
 }
 
+#[cfg(feature = "avian")]
 /// Properties derived for a [`CharacterController`] that are constant for a character.
 #[derive(Component, Clone, Debug, Default)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
@@ -402,6 +442,7 @@ pub struct CharacterControllerDerivedProps {
     pub hand_collider: Collider,
 }
 
+#[cfg(feature = "avian")]
 impl CharacterControllerDerivedProps {
     pub fn collider(&self, state: &CharacterControllerState) -> &Collider {
         if state.crouching {
@@ -546,6 +587,7 @@ pub struct TouchingEntity {
     #[doc(alias = "time_of_impact")]
     pub collision_distance: f32,
 }
+#[cfg(feature = "avian")]
 impl From<MoveAndSlideHitData<'_>> for TouchingEntity {
     fn from(value: MoveAndSlideHitData<'_>) -> Self {
         Self {

@@ -28,10 +28,11 @@ use bevy_transform::{
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "avian")]
+use crate::CharacterController;
 use crate::{
-    CharacterController, CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
+    CharacterControllerOutput, CharacterLook, MantleOutput, TouchingEntity,
     input::AccumulatedInput,
-    kcc,
     water::{WaterLevel, WaterState},
 };
 
@@ -574,12 +575,71 @@ pub struct Box3dCharacterController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Component)]
 pub struct Box3dCharacterControllerOrder(pub u64);
 
+/// Matches `Self::from(CharacterController::default())`, spelled out so the
+/// Box3D controller builds without the `avian` feature.
 impl Default for Box3dCharacterController {
     fn default() -> Self {
-        Self::from(CharacterController::default())
+        Self {
+            height: 1.8,
+            crouch_height: 1.3,
+            radius: 0.7,
+            view_height: 1.7,
+            crouch_view_height: 1.2,
+            crouch_speed_scale: 1.0 / 3.0,
+            ground_distance: 0.05,
+            min_walk_cos: 40.0_f32.to_radians().cos(),
+            stop_speed: 2.54,
+            friction_hz: 12.0,
+            acceleration_hz: 8.0,
+            air_acceleration_hz: 12.0,
+            water_acceleration_hz: 12.0,
+            water_slowdown: 0.6,
+            water_gravity: 2.4,
+            gravity: 29.0,
+            speed: 12.0,
+            air_speed: 1.5,
+            max_speed: 100.0,
+            max_air_wish_speed: 0.76,
+            jump_height: 1.8,
+            air_friction: 0.0,
+            tac_power: 0.755,
+            tac_jump_factor: 1.0,
+            tac_input_buffer: Duration::from_millis(150),
+            max_tac_cos: 40.0_f32.to_radians().cos(),
+            tac_cooldown: Duration::from_millis(300),
+            mantle_input_buffer: Duration::from_millis(50),
+            climbdown_input_buffer: Duration::from_millis(150),
+            mantle_height: 1.0,
+            mantle_speed: 5.0,
+            min_mantle_cos: 50.0_f32.to_radians().cos(),
+            min_mantle_ledge_space: 0.5,
+            min_ledge_grab_space: Vec3::new(0.2, 0.1, 0.2),
+            max_ledge_grab_distance: 0.3,
+            climb_pull_up_height: 0.3,
+            climb_reverse_sin: 40.0_f32.to_radians().sin(),
+            climb_sensitivity: 2.5,
+            ledge_jump_power: 1.5,
+            ledge_jump_factor: 0.8,
+            crane_input_buffer: Duration::from_millis(200),
+            crane_height: 1.5,
+            crane_speed: 11.0,
+            min_crane_cos: 50.0_f32.to_radians().cos(),
+            min_crane_ledge_space: 0.35,
+            jump_crane_chain_time: Duration::from_millis(140),
+            unground_speed: 10.0,
+            coyote_time: Duration::from_millis(100),
+            jump_input_buffer: Duration::from_millis(150),
+            skin_width: 0.015,
+            max_slides: 20,
+            push_mass: 80.0,
+            step_size: 0.7,
+            step_down_detection_distance: 0.2,
+            min_step_ledge_space: 0.2,
+        }
     }
 }
 
+#[cfg(feature = "avian")]
 impl From<CharacterController> for Box3dCharacterController {
     fn from(value: CharacterController) -> Self {
         Self {
@@ -2210,7 +2270,7 @@ fn calculate_box3d_climb_factor(
         return 0.0;
     }
     let movement = input.last_movement.unwrap_or_default().y;
-    let cos = (kcc::forward(look.to_quat()) * movement.abs()).y;
+    let cos = (crate::forward(look.to_quat()) * movement.abs()).y;
     let factor = ((cos + cfg.climb_reverse_sin) * cfg.climb_sensitivity).clamp(-1.0, 1.0);
     if movement < 0.0 { -factor } else { factor }
 }
@@ -2232,7 +2292,7 @@ fn handle_box3d_ledge_jump(
     }
     let movement = input.last_movement.unwrap_or_default();
     let direction = if movement.y >= 0.0 {
-        let forward = kcc::forward(look.to_quat());
+        let forward = crate::forward(look.to_quat());
         let flat_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         (Vec3::Y * cfg.ledge_jump_factor + flat_forward).normalize_or_zero()
     } else {
@@ -2366,10 +2426,10 @@ fn calculate_wish_velocity(
     look: &CharacterLook,
 ) -> Vec3 {
     let movement = input.last_movement.unwrap_or_default();
-    let mut forward = kcc::forward(look.to_quat());
+    let mut forward = crate::forward(look.to_quat());
     forward.y = 0.0;
     forward = forward.normalize_or_zero();
-    let mut right = kcc::right(look.to_quat());
+    let mut right = crate::right(look.to_quat());
     right.y = 0.0;
     right = right.normalize_or_zero();
 
@@ -2392,7 +2452,7 @@ fn calculate_3d_wish_velocity(
 ) -> Vec3 {
     let movement = input.last_movement.unwrap_or_default();
     let wish_velocity =
-        movement.y * kcc::forward(look.to_quat()) + movement.x * kcc::right(look.to_quat());
+        movement.y * crate::forward(look.to_quat()) + movement.x * crate::right(look.to_quat());
     let speed = if state.crouching {
         cfg.speed * cfg.crouch_speed_scale
     } else {
@@ -2455,7 +2515,7 @@ fn prepare_box3d_ladder_velocity(
     horizontal.y = 0.0;
 
     if movement.y > f32::EPSILON {
-        let forward = kcc::forward(look.to_quat());
+        let forward = crate::forward(look.to_quat());
         if forward.y < -cfg.climb_reverse_sin {
             ladder_velocity -= Vec3::Y * cfg.speed;
         } else if box3d_ladder_pushes_into_adjacent_collider(
@@ -3792,10 +3852,13 @@ mod tests {
         assert_eq!(state.platform_angular_velocity, Vec3::ZERO);
     }
 
+    #[cfg(feature = "avian")]
     #[test]
     fn box3d_defaults_track_avian_controller_defaults() {
         let avian = CharacterController::default();
         let box3d = Box3dCharacterController::default();
+
+        assert_eq!(box3d, Box3dCharacterController::from(avian.clone()));
 
         assert_eq!(box3d.crouch_height, avian.crouch_height);
         assert_eq!(box3d.view_height, avian.standing_view_height);

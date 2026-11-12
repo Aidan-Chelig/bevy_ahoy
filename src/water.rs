@@ -1,7 +1,11 @@
-use crate::{CharacterControllerState, prelude::*};
+use crate::prelude::*;
+#[cfg(feature = "avian")]
+use crate::CharacterControllerState;
 
+#[cfg(feature = "avian")]
 pub struct AhoyWaterPlugin;
 
+#[cfg(feature = "avian")]
 impl Plugin for AhoyWaterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
@@ -31,6 +35,7 @@ pub enum WaterLevel {
     Head,
 }
 
+#[cfg(feature = "avian")]
 #[derive(Reflect, Component, Default)]
 #[require(Sensor, Transform, GlobalTransform)]
 #[reflect(Component)]
@@ -38,6 +43,7 @@ pub struct Water {
     pub speed: f32,
 }
 
+#[cfg(feature = "avian")]
 fn update_water(
     mut kccs: Query<(
         &Position,

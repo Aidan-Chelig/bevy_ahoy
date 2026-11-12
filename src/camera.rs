@@ -4,10 +4,9 @@ use std::{f32::consts::TAU, time::Duration};
 use avian_pickup::actor::AvianPickupActor;
 use bevy_ecs::{lifecycle::HookContext, relationship::Relationship, world::DeferredWorld};
 
-use crate::{
-    CharacterControllerDerivedProps, CharacterControllerState, CharacterLook,
-    kcc::spin_character_look, prelude::*,
-};
+use crate::{CharacterLook, prelude::*};
+#[cfg(feature = "avian")]
+use crate::{CharacterControllerDerivedProps, CharacterControllerState, kcc::spin_character_look};
 
 #[cfg(feature = "box3d")]
 use crate::box3d::{Box3dCharacterController, Box3dCharacterControllerState};
@@ -18,25 +17,33 @@ impl Plugin for AhoyCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             RunFixedMainLoop,
-            (
-                copy_camera_to_character_look.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-                sync_camera_transform.after(TransformEasingSystems::UpdateEasingTick),
-            ),
-        )
-        .add_systems(
-            Update,
-            copy_character_look_to_camera.after(spin_character_look),
+            copy_camera_to_character_look.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
         .add_observer(rotate_camera)
         .add_observer(yank_camera);
 
-        #[cfg(feature = "box3d")]
+        #[cfg(feature = "avian")]
+        app.add_systems(
+            RunFixedMainLoop,
+            sync_camera_transform.after(TransformEasingSystems::UpdateEasingTick),
+        )
+        .add_systems(
+            Update,
+            copy_character_look_to_camera.after(spin_character_look),
+        );
+        #[cfg(not(feature = "avian"))]
+        app.add_systems(Update, copy_character_look_to_camera);
+
+        #[cfg(all(feature = "box3d", feature = "avian"))]
         app.add_systems(
             RunFixedMainLoop,
             sync_box3d_camera_transform
                 .after(TransformEasingSystems::UpdateEasingTick)
                 .after(sync_camera_transform),
         );
+        // Without Avian there is no transform easing or Avian camera to order against.
+        #[cfg(all(feature = "box3d", not(feature = "avian")))]
+        app.add_systems(RunFixedMainLoop, sync_box3d_camera_transform);
     }
 }
 
@@ -93,6 +100,7 @@ impl CharacterControllerCamera {
     }
 }
 
+#[cfg(feature = "avian")]
 pub(crate) fn sync_camera_transform(
     mut cameras: Query<
         (&mut Transform, &CharacterControllerCameraOf),
