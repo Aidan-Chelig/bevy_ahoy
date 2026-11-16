@@ -477,6 +477,20 @@ impl Box3dArticulatedPickupConfig {
 #[derive(Default, Resource)]
 struct Box3dPickupConstraints(HashMap<Entity, box3d::BodyId>);
 
+/// Release native articulated pickup joints before rebuilding a physics world.
+/// Destroying each kinematic target body destroys its attached joint as well.
+pub fn clear_box3d_pickup_constraints(world: &mut World) {
+    if let Some(mut constraints) = world.get_resource_mut::<Box3dPickupConstraints>() {
+        let mut targets: Vec<_> = constraints.0.drain().map(|(_, target)| target).collect();
+        targets.sort_unstable_by_key(|target| target.to_bits());
+        for target in targets {
+            if target.is_valid() {
+                target.destroy();
+            }
+        }
+    }
+}
+
 /// Debug points for the active pickup ray and spring target.
 #[derive(Clone, Copy, Debug, Default, Resource)]
 pub struct Box3dPickupDebugState {
@@ -3598,6 +3612,39 @@ fn validate_box3d_velocity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_pickup_constraints_releases_only_native_targets() {
+        let runtime = Box3dRuntime::new(AhoyBox3dConfig::default());
+        let unrelated = runtime
+            .world
+            .create_body(box3d::BodyDef::dynamic_at(box3d::Vec3::ZERO));
+        let mut targets = Vec::new();
+        for _ in 0..3 {
+            let target = runtime
+                .world
+                .create_body(box3d::BodyDef::kinematic_at(box3d::Vec3::ZERO));
+            targets.push(target.id());
+            std::mem::forget(target);
+        }
+        // Teardown may encounter a target whose held body was already removed.
+        targets[2].destroy();
+        let mut world = World::new();
+        world.insert_resource(Box3dPickupConstraints(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| (Entity::from_bits(100 + index as u64), *target))
+                .collect(),
+        ));
+
+        clear_box3d_pickup_constraints(&mut world);
+        assert!(world.resource::<Box3dPickupConstraints>().0.is_empty());
+        assert!(targets.iter().all(|target| !target.is_valid()));
+        assert!(unrelated.id().is_valid());
+        clear_box3d_pickup_constraints(&mut world);
+        assert!(unrelated.id().is_valid());
+    }
 
     #[test]
     fn character_remains_grounded_through_rotating_platform_half_turn() {
